@@ -1,0 +1,90 @@
+# headlamp -- BASE values
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/headlamp-k8s/headlamp
+  # Empty = "v<Chart.appVersion>".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+baseUrl: /headlamp
+
+serviceAccount:
+  create: true
+  name: headlamp
+  # Bound to NOTHING. With OIDC every API call carries the user's token; a pod
+  # identity with cluster-admin behind a web UI is a privilege-escalation path for
+  # anyone who can reach the page.
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# A UI, not a platform dependency: evicted before platform services.
+priorityClassName: ""
+
+oidc:
+  enabled: true
+  # Per cluster, e.g. https://<host>/keycloak/realms/<realm>
+  issuerUrl: ""
+  scopes: "openid,profile,email,groups"
+  # Pre-created Secret with keys client-id and client-secret (gitops setup/, or a
+  # CSI-synced Secret). The chart renders no Secret.
+  existingSecret: headlamp-oidc
+
+# Keycloak groups (the `groups` claim the API server maps with prefix "") bound to
+# BUILT-IN ClusterRoles. cluster-admin is refused: that tier belongs to the
+# cluster's break-glass path, not to a browser session.
+groupRbac:
+  enabled: true
+  bindings:
+    - group: headlamp-admins
+      clusterRole: admin
+    - group: headlamp-viewers
+      clusterRole: view
+
+httpRoute:
+  enabled: true
+  gateway:
+    name: traefik-gateway
+    namespace: traefik
+    sectionName: websecure
+  # Per cluster.
+  hostnames: []
+
+livenessProbe:
+  httpGet:
+    path: /headlamp/
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /headlamp/
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 5

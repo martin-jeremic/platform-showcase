@@ -1,0 +1,45 @@
+# vpa -- base defaults. Everything upstream lives under `vpa:`.
+
+vpa:
+  enabled: true
+
+  # One key for every VPA pod (the subchart has no per-component setting).
+  priorityClassName: system-cluster-critical
+
+  recommender:
+    enabled: true
+    extraArgs:
+      # Floors applied to EVERY recommendation, regardless of the minAllowed on an
+      # individual VerticalPodAutoscaler. Upstream ships 15m / 100MB -- above what the
+      # smallest workloads on the hub request (64Mi SPAs), so every one of them would
+      # report ~100Mi no matter what it actually uses: the measurement would be of
+      # this flag, not of the app. Lowered until it cannot bind.
+      #
+      # Symptom if a floor is ever too high again: several unrelated workloads all
+      # reporting the SAME number.
+      pod-recommendation-min-cpu-millicores: 10
+      pod-recommendation-min-memory-mb: 16
+    # Upstream requests 50m / 500Mi, sized for a large fleet. The recommender keeps
+    # its usage histograms in memory; no memory limit on purpose, because an OOM
+    # kill loses the in-memory history and restarts the measurement.
+    resources:
+      requests:
+        cpu: 25m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+
+  # Updater and admission controller -- deliberately OFF. These two make a VPA
+  # *act*: the updater evicts pods it judges mis-sized, the admission controller
+  # rewrites requests as pods are created. With both off, this install can only
+  # observe -- a cluster-level safety net that holds even if a workload's own VPA
+  # object is set to updateMode "Auto" by mistake.
+  updater:
+    enabled: false
+  admissionController:
+    enabled: false
+
+  # The cluster already runs metrics-server; a second would fight it over the same
+  # APIService. Off is also the upstream default; stated because it is load-bearing.
+  metrics-server:
+    enabled: false

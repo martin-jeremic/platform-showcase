@@ -1,0 +1,93 @@
+# stages/pr-helm-stage.yml
+#
+# PR gate for a repository's Helm charts. For every chart directory:
+#
+#   1. helm lint, once per values file;
+#   2. helm template, once per values file: each values-*.yaml and each ci/*.yaml layered on top
+#      of values.yaml (the way the cluster renders it), and values.yaml alone only when the chart
+#      has no ci/*.yaml. A placeholder digest is set so the `image@digest` branch is rendered too;
+#   3. fail if any template iterates with `{{ range }}`.
+#
+# Why no `range` (the explicit-keys house rule): config templates once used
+#   {{- range $k, $v := .Values.config }}{{ if $v }}{{ $k }}: {{ $v | quote }}{{ end }}{{ end }}
+# and the blanket `if $v` silently DROPPED every key whose value was empty, false or 0. A flag
+# set to false did not render as "false"; it vanished, and the application's own default
+# (true) won. Writing every key out means the chart states its whole contract, a renamed key
+# breaks `helm template` instead of disappearing, and the GitOps ConfigMap check can see which
+# keys exist. Set forbidRange: false only for a chart that genuinely needs a list (e.g. one
+# CronJob per dataset), and say why in the chart.
+#
+# Placeholders (<<NAME>>) are NOT refused here, only at deploy time
+# (refuse-placeholders-stage.yml), so PRs stay green while the facts are still being gathered.
+
+parameters:
+  - name: stageName
+    type: string
+    default: HelmValidate
+  - name: dependsOn
+    type: object
+    default: []
+  # Chart directories relative to the repo root.
+  - name: charts
+    type: object
+  - name: namespace
+    type: string
+    default: pr-validation
+  - name: forbidRange
+    type: boolean
+    default: true
+  - name: helmVersion
+    type: string
+    default: '4.2.0'
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Helm lint + template
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: Charts
+        displayName: Lint and render every chart
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - task: HelmInstaller@1
+            displayName: Install Helm ${{ parameters.helmVersion }}
+            inputs:
+              helmVersionToInstall: ${{ parameters.helmVersion }}
+          - ${{ each chart in parameters.charts }}:
+            - bash: |
+                set -euo pipefail
+                shopt -s nullglob
+                DIGEST="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                COMMON=(--set "image.digest=$DIGEST" --set "image.tag=0.0.0-pr")
+                # values.yaml alone is rendered only for charts that ship no ci/*.yaml. A chart that
+                # `required`s per-environment facts (hostnames, vault names, client ids) cannot render
+                # bare, on purpose; its ci/*.yaml files are the test fixtures (chart-testing convention).
+                VARIANTS=()
+                CI_FILES=("$CHART"/ci/*.yaml)
+                [ ${#CI_FILES[@]} -eq 0 ] && VARIANTS+=("")
+                for f in "$CHART"/values-*.yaml "${CI_FILES[@]}"; do VARIANTS+=("$f"); done
+
+                for v in "${VARIANTS[@]}"; do
+                  ARGS=("${COMMON[@]}")
+                  [ -z "$v" ] || ARGS+=(-f "$v")
+                  echo "== ${v:-values.yaml}"
+                  helm lint "$CHART" "${ARGS[@]}"
+                  helm template pr "$CHART" --namespace "$NAMESPACE" "${ARGS[@]}" > /dev/null
+                done
+
+                if [ "${FORBID_RANGE,,}" = "true" ] && \
+                   grep -rnE '\{\{-?[[:space:]]*range[[:space:]]' "$CHART/templates"; then
+                  echo "##vso[task.logissue type=error]$CHART: a template iterates with range (above). Write each key out explicitly."
+                  exit 1
+                fi
+              displayName: ${{ chart }}
+              env:
+                CHART: ${{ chart }}
+                NAMESPACE: ${{ parameters.namespace }}
+                FORBID_RANGE: ${{ parameters.forbidRange }}

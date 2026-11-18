@@ -1,0 +1,23 @@
+apiVersion: v2
+name: vpa
+description: >-
+  Vertical Pod Autoscaler in MEASUREMENT-ONLY form: the upstream Fairwinds `vpa`
+  chart's CRDs plus the recommender, which watches real CPU and memory usage and
+  publishes a sizing recommendation per workload. The updater and the admission
+  controller do NOT run, so nothing in this release can resize, restart or evict a
+  pod -- recommendations are data to read, and applying one is a deliberate edit
+  to a workload's own values. That is also what makes it safe beside a CPU/memory
+  HPA, which would otherwise fight it over the same signal. For the on-prem hub,
+  which has no VPA add-on; AKS clusters use the managed add-on from their IaC.
+type: application
+version: 0.1.0
+appVersion: "1.7.1"
+keywords:
+  - vpa
+  - autoscaling
+  - right-sizing
+dependencies:
+  - name: vpa
+    version: "5.1.0"
+    repository: "https://charts.fairwinds.com/stable"
+    condition: vpa.enabled

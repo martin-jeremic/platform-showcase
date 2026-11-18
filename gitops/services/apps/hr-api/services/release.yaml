@@ -1,0 +1,10 @@
+# Env descriptor read by the `services` ApplicationSet. Its PRESENCE deploys hr-api to services.
+# chart.version is written by the CD promotion; chart.name and destination are hand-seeded once.
+chart:
+  name: "hr-api"
+  version: "0.12.1"
+# services = the registered spoke. `server` stays present and empty: missingkey=error.
+destination:
+  server: ""
+  name: "aks-org-prod"
+  namespace: hr

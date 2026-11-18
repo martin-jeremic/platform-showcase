@@ -1,0 +1,68 @@
+# Edge (Traefik gateway) alerts.
+#
+# Scrape prerequisite: traefik with traefik.metrics.prometheus.service
+# enabled (base values) and serviceMonitor enabled (each cluster's values file,
+# only where a Prometheus Operator runs).
+#
+# THE JOB LABEL IS DERIVED, NOT DECLARED: prometheus-operator names it after the
+# metrics Service, `<traefik fullname>-metrics`. The traefik subchart's fullname
+# resolves to the release name (traefik-gateway contains "traefik"), and every
+# cluster's descriptor uses release traefik-gateway (checked on every cluster:
+# demo, prod, stage), so the job is `traefik-gateway-metrics` everywhere. A
+# descriptor that adopts a differently named release changes it -- the way
+# rabbitmq's did on demo, which is why rabbitmq pins its job label
+# instead. A wrong value never fires and
+# never errors -- read it from live Prometheus before flipping
+# prometheusRules.files.edge:
+#   curl -s 'http://localhost:9090/api/v1/label/job/values' | grep traefik
+#
+# The entrypoint is `websecure` on every Gateway (traefik
+# values.yaml: --entrypoints.websecure.address=:8443).
+#
+# CLUSTER-AWARE: `sum by (cluster[, router])`, see rules/workload.yaml.
+#
+# Ported from the product lineage of this chart, made cluster-aware.
+groups:
+  - name: platform.edge
+    rules:
+      - alert: PlatformEdge5xxRateHigh
+        # Ratio guarded by a minimum-traffic clause, so a single failed request at
+        # 3am cannot fire it.
+        expr: |
+          (
+            sum by (cluster) (rate(traefik_entrypoint_requests_total{job="traefik-gateway-metrics", code=~"5..", entrypoint="websecure"}[5m]))
+              /
+            sum by (cluster) (rate(traefik_entrypoint_requests_total{job="traefik-gateway-metrics", entrypoint="websecure"}[5m]))
+          ) > 0.05
+          and
+          sum by (cluster) (rate(traefik_entrypoint_requests_total{job="traefik-gateway-metrics", entrypoint="websecure"}[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Edge 5xx ratio >5% on {{ $labels.cluster }}"
+          description: >-
+            {{ $value | humanizePercentage }} of HTTPS requests through the Traefik
+            gateway on {{ $labels.cluster }} returned 5xx over the last 10m. A backend
+            behind the edge is failing.
+
+      - alert: PlatformEdgeRouterErrorRateHigh
+        # addRoutersLabels: true (traefik) -> per-router series; names the
+        # failing route directly.
+        expr: |
+          (
+            sum by (cluster, router) (rate(traefik_router_requests_total{job="traefik-gateway-metrics", code=~"5.."}[5m]))
+              /
+            sum by (cluster, router) (rate(traefik_router_requests_total{job="traefik-gateway-metrics"}[5m]))
+          ) > 0.25
+          and
+          sum by (cluster, router) (rate(traefik_router_requests_total{job="traefik-gateway-metrics"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Router {{ $labels.router }} 5xx ratio >25%"
+          description: >-
+            Route {{ $labels.router }} on {{ $labels.cluster }} is returning
+            {{ $value | humanizePercentage }} 5xx while the rest of the edge looks
+            healthy. Its backend is failing.

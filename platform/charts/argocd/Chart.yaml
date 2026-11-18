@@ -1,0 +1,52 @@
+apiVersion: v2
+name: argocd
+description: >-
+  Argo CD, self-managed. Wrapper around the upstream argo-cd chart that adds the
+  Traefik Gateway API HTTPRoute and Keycloak OIDC SSO which the OpenTofu bootstrap
+  install deliberately leaves out. TLS terminates at the Gateway; Argo CD runs in
+  insecure mode behind the proxy.
+  THIS COMPONENT MANAGES THE CONTROLLER PERFORMING ITS OWN SYNC. Its Application
+  never prunes (island) or never auto-syncs (hub), and the release name must match
+  the bootstrap helm_release exactly or Argo stands up a parallel install instead
+  of adopting the existing one.
+type: application
+
+# Version of THIS wrapper chart. Bump on any change to templates or defaults.
+#
+# 1.3.0 -- argo-cd 10.4.0 -> 10.11.6 (Argo CD v3.5.1 -> v3.5.6), and
+#   global.priorityClassName system-cluster-critical for every component, which the
+#   production floor requires and which was missing: the controller, repo-server
+#   and applicationset pods ran at priority 0, below the platform services they
+#   deploy. The tofu bootstrap is updated to the same chart version and the same
+#   priority, so a rebuilt cluster still hands off byte-identical.
+version: 1.3.0
+appVersion: "3.5.6"
+
+keywords:
+  - argocd
+  - gitops
+  - gateway-api
+  - oidc
+home: https://argo-cd.readthedocs.io/
+sources:
+  - https://github.com/argoproj/argo-cd
+
+dependencies:
+  - name: argo-cd
+    # Pinned exactly. This pin is the ONE place the Argo CD version is set -- the
+    # images default to the subchart's appVersion, so do not also pin an image tag
+    # in a values file.
+    #
+    # MUST equal the chart version the OpenTofu bootstrap installs on a fresh
+    # cluster (infra/: the argocd helm_release). A different subchart
+    # version means the self-management handoff is simultaneously an upgrade of
+    # the controller that is performing it -- survivable, but the wrong time to
+    # find out.
+    #
+    # On a LIVE cluster the handoff is long done and the tofu release is frozen
+    # (lifecycle ignore_changes = all), so a bump here is an ordinary self-upgrade.
+    # `helm list -n argocd` keeps reporting the bootstrap version forever after the
+    # handoff -- Argo applies manifests, it never writes Helm release records -- so
+    # read the running version from the pods, not from helm.
+    version: "10.11.6"
+    repository: https://argoproj.github.io/argo-helm

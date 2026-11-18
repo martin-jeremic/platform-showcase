@@ -1,0 +1,5 @@
+# CI values: a running cluster, observability present, so the PodMonitor is on.
+reloader:
+  reloader:
+    podMonitor:
+      enabled: true

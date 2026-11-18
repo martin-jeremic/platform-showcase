@@ -1,0 +1,12 @@
+# PROD render target for the root app (product-a-apps-root) on the Argo CD that runs ON
+# aks-product-a-prod. Because a kustomization.yaml is present, Argo renders ONLY these two files.
+#
+# ../../setup/ (one-time credentials) and ../../root-application-prod.yaml (applied by hand once)
+# are deliberately absent; see ../../kustomization.yaml for why credentials must never be in a
+# render target. The hub's ../../kustomization.yaml is the stage/demo equivalent and lists
+# neither of these two files.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - project-product-a-prod.yaml
+  - appset-product-a-prod.yaml

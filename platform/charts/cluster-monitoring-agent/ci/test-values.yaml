@@ -1,0 +1,41 @@
+# CI values: the product-a-stage spoke (on-prem MicroK8s, same LAN as the hub).
+# Workload identity works there because the cluster publishes its service-account
+# issuer (chart oidc-issuer), so Entra can verify its tokens.
+global:
+  cluster: product-a-stage
+hub:
+  otlp:
+    endpoint: 10.0.0.10:31317
+mtls:
+  source: keyVault
+  keyVault:
+    keyvaultName: kv-product-a-stage
+    tenantId: "11111111-1111-1111-1111-111111111111"
+    authMode: workloadIdentity
+metrics:
+  rabbitmq:
+    enabled: true
+    namespace: rabbitmq
+    podLabelSelector: "app.kubernetes.io/name=rabbitmq"
+    jobName: rabbitmq
+  trivy:
+    enabled: true
+    serviceName: trivy
+    namespace: trivy
+alloy:
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+  controller:
+    podLabels:
+      azure.workload.identity/use: "true"
+    # FULL restatement (lists replace wholesale): the CSI volume replaces the base
+    # Secret volume; the /etc/alloy/tls mount stays as in the base.
+    volumes:
+      extra:
+        - name: hub-tls
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: cluster-monitoring-agent-hub-tls

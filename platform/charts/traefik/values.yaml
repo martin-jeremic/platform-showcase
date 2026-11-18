@@ -1,0 +1,395 @@
+# =============================================================================
+# traefik -- BASE values (cluster-agnostic)
+# =============================================================================
+# Sync wave 2. The Gateway this chart creates is the single public entrypoint of
+# the cluster: every later component attaches an HTTPRoute to it, so nothing after
+# wave 2 is reachable until this is Programmed and its certificate issued.
+#
+# Cluster facts (the public hostname, the static public IP and its resource group)
+# live in the gitops repo: platform/values/<cluster>/traefik.yaml.
+#
+# ONE HOST PER CLUSTER, path-based. The apex path `/` is RESERVED for the main
+# application UI, which is out of scope for the platform repo -- no platform
+# HTTPRoute may claim PathPrefix `/`, or it shadows the application
+# (tools/check-platform.sh gates on it). Platform surfaces live under:
+#     /argocd              argocd
+#     /keycloak            keycloak
+#     /monitoring/grafana  grafana-sso-gateway
+# =============================================================================
+
+nameOverride: ""
+# The Helm RELEASE may be called anything, but the workload keeps this stable name.
+fullnameOverride: "traefik-gateway"
+
+# -- Extra labels applied to every resource this umbrella chart renders.
+commonLabels: {}
+
+# -----------------------------------------------------------------------------
+# Gateway API CRDs
+# -----------------------------------------------------------------------------
+# Not templated here on purpose: this chart also creates Gateway/GatewayClass
+# custom resources, and Helm cannot build a manifest referencing a CRD that is not
+# yet registered ("no matches for kind Gateway"). They ride in THIS chart's crds/
+# directory, which Helm installs BEFORE the manifest is built and Argo CD re-applies
+# (ServerSideApply) on every sync.
+#
+# OWNED HERE SINCE 1.2.0. Until then they came from the Traefik subchart (v1.4.0);
+# traefik chart 40.2.0 stopped bundling them. Traefik v3.7.16 is built against
+# Gateway API v1.6.3 (its go.mod; its provider docs: "supports Standard version
+# v1.6.3"), and v3.7 needs >= v1.5 -- so the version is pinned here, not implied by
+# the subchart.
+#
+# Vendored from the upstream v1.6.3 release (standard-install.yaml), split at its
+# own file boundary:
+#   crds/gateway-api-standard-install.yaml    the 10 CRDs
+#   templates/gateway-api-safe-upgrades.yaml  the safe-upgrades
+#     ValidatingAdmissionPolicy + Binding (verbatim)
+# The policy is not a CRD, and crds/ holds CRDs only (Helm 4's lint rejects anything
+# else there). Re-joined with the upstream separator the two are byte-identical to
+# the release file. To bump: split the new release the same way, after checking
+# which Gateway API version the new Traefik is built against.
+#
+# THE POLICY IS A ONE-WAY RATCHET: it denies any gateway.networking.k8s.io CRD with
+# bundle-version v1.0-v1.5.x, and an experimental bundle over a standard one. Once
+# live, re-syncing chart 1.1.0 (subchart v1.4.0) fails at the CRD apply -- roll
+# forward. The AppProject must allow ValidatingAdmissionPolicy(+Binding), or the
+# sync fails "not permitted in project".
+#
+# DO NOT set skipCrds on this component's Application. An older descriptor
+# justified skipping them with "cluster already has Gateway API CRDs >= v1.5.0,
+# protected by the safe-upgrades admission policy". That was false where it was
+# claimed -- v1.4.0, no policy -- and skipping them means the CRDs never register on
+# a fresh cluster and never upgrade on a live one. Verify with (expect v1.6.3):
+#   kubectl get crd gateways.gateway.networking.k8s.io \
+#     -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}'
+
+# -----------------------------------------------------------------------------
+# GatewayClass (cluster-scoped)
+# -----------------------------------------------------------------------------
+gatewayClass:
+  create: true
+  name: traefik
+  # Must match the controller shipped by the Traefik subchart.
+  controllerName: traefik.io/gateway-controller
+
+# -----------------------------------------------------------------------------
+# Gateway -- the central entrypoint every service HTTPRoute attaches to.
+# -----------------------------------------------------------------------------
+gateway:
+  create: true
+  # The Gateway object's name is this value, NOT the release name, and every
+  # application HTTPRoute targets `traefik-gateway` in its parentRefs. Renaming it
+  # would silently detach every one of them.
+  name: traefik-gateway
+  # Defaults to the release namespace when empty.
+  namespace: ""
+  annotations: {}
+  labels: {}
+
+  # `port` is the Gateway-API listener port and MUST match a Traefik entrypoint
+  # port under traefik.ports below (8000 web / 8443 websecure).
+  listeners:
+    web:
+      enabled: true
+      name: web
+      protocol: HTTP
+      port: 8000
+      # Left open: the redirect HTTPRoute filters by hostname itself, and a
+      # listener hostname here would also have to be kept in sync with it.
+      hostname: ""
+      allowedRoutes:
+        namespaces:
+          from: All
+    websecure:
+      enabled: true
+      name: websecure
+      protocol: HTTPS
+      port: 8443
+      # Gateway-API listener hostnames match EXACTLY -- there is no implicit
+      # subdomain match. This MUST equal certificate.dnsNames. If they diverge,
+      # SNI misses, Traefik answers with its self-signed default certificate, and
+      # every route reports Accepted=False / NoMatchingParent while the Gateway
+      # still looks Programmed. Per cluster; the template requires it.
+      hostname: ""
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: platform-edge-tls
+      allowedRoutes:
+        namespaces:
+          # Routes come from keycloak, argocd, observability and the application
+          # namespaces, so this cannot be narrowed to Same.
+          from: All
+
+# -----------------------------------------------------------------------------
+# cert-manager Certificate for the websecure listener's TLS secret.
+# -----------------------------------------------------------------------------
+certificate:
+  enabled: true
+  name: platform-edge-cert
+  # Must match the listener's certificateRefs[].name above.
+  secretName: platform-edge-tls
+  # Must cover the listener hostname, or the browser rejects the cert. Per cluster.
+  dnsNames: []
+  issuerRef:
+    # Created by the cert-manager chart in wave 1. If that ClusterIssuer is not
+    # Ready -- most likely because the DNS-01 token Secret was never seeded --
+    # this Certificate stays unissued and the edge never comes up.
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+    group: cert-manager.io
+  extraSpec: {}
+
+# -----------------------------------------------------------------------------
+# HTTP -> HTTPS redirect (see templates/redirect-httproute.yaml)
+# -----------------------------------------------------------------------------
+redirect:
+  enabled: true
+  name: https-redirect
+  # Per cluster: the same host as the websecure listener.
+  hostnames: []
+  statusCode: 301
+
+# -----------------------------------------------------------------------------
+# TLS floor (see templates/tlsoption.yaml)
+# -----------------------------------------------------------------------------
+tlsOption:
+  enabled: true
+  # `default` is load-bearing: that exact name is what makes this apply to every
+  # TLS connection cluster-wide, and providers.kubernetesCRD
+  # .defaultTLSResourcesNamespace confines it to Traefik's own namespace.
+  name: default
+  minVersion: VersionTLS12
+  maxVersion: ""
+  # TLS 1.2 only -- 1.3 suites are fixed and this list is ignored for them.
+  # Forward-secret AEAD suites only: no CBC, no RSA key exchange, no 3DES.
+  cipherSuites:
+    - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+    - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+  curvePreferences:
+    - CurveP256
+    - CurveP384
+  # false deliberately. With sniStrict: true a client that sends no SNI gets no
+  # certificate at all -- which breaks health probes and older tooling. The single
+  # -SAN cert already means there is nothing to leak by serving the default.
+  sniStrict: false
+
+# -----------------------------------------------------------------------------
+# Middleware (see templates/middlewares.yaml)
+# -----------------------------------------------------------------------------
+# Each item is rendered once per entry in `namespaces` (default: the release
+# namespace). ExtensionRef resolves namespace-locally: a route in ns keycloak can
+# only use a Middleware that exists in ns keycloak.
+#
+# HOW THEY ARE ATTACHED (a defined middleware nobody references does nothing):
+#   security-headers  to EVERY request on websecure, at the entrypoint level --
+#                     traefik.ports.websecure.middlewares below. No route can opt
+#                     out by forgetting a filter.
+#   auth-ratelimit    per route, on the authentication surfaces only: the keycloak
+#                     and argocd charts add an ExtensionRef filter to their
+#                     HTTPRoutes, which is why it is rendered into those namespaces.
+middlewares:
+  - name: security-headers
+    enabled: true
+    namespaces: []
+    spec:
+      headers:
+        # HSTS. 1 year, subdomains included. NOT preload -- preloading is
+        # effectively irreversible and should be a deliberate, separate decision.
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: false
+        forceSTSHeader: true
+        # Stop MIME sniffing and clickjacking.
+        contentTypeNosniff: true
+        frameDeny: true
+        browserXssFilter: true
+        referrerPolicy: strict-origin-when-cross-origin
+        permissionsPolicy: "geolocation=(), microphone=(), camera=()"
+  - name: auth-ratelimit
+    enabled: true
+    namespaces:
+      - keycloak
+      - argocd
+    spec:
+      # Applied to authentication paths only, so a credential-stuffing run is
+      # throttled without rate-limiting ordinary application traffic. Keyed on the
+      # client IP, which is only the REAL client IP because of
+      # externalTrafficPolicy: Local below.
+      rateLimit:
+        average: 20
+        burst: 40
+        period: 1s
+
+# -----------------------------------------------------------------------------
+# ReferenceGrants -- allow cross-namespace refs.
+# -----------------------------------------------------------------------------
+referenceGrants: []
+
+# -----------------------------------------------------------------------------
+# Optional HTTPRoutes rendered by THIS chart. Real service routes belong in each
+# service's own chart. Empty by default. Every route attaches to `websecure` unless
+# it names another listener: a route with no sectionName binds to EVERY listener,
+# including plaintext `web`, where it ties with the redirect route.
+# Never add one with `path: { type: PathPrefix, value: / }`.
+# -----------------------------------------------------------------------------
+httpRoutes: []
+
+# =============================================================================
+# Upstream Traefik subchart values
+# =============================================================================
+traefik:
+  # This umbrella chart owns the GatewayClass + Gateway objects, so disable the
+  # subchart's built-in ones to avoid duplicate objects and ownership conflicts.
+  gateway:
+    enabled: false
+  gatewayClass:
+    enabled: false
+
+  providers:
+    kubernetesGateway:
+      enabled: true
+    # No legacy Ingress path.
+    kubernetesIngress:
+      enabled: false
+    # ENABLED, unlike the forked chart. This is what makes the edge hardening
+    # real: TLSOption and Middleware are traefik.io CRDs, and with this provider
+    # off Traefik never watches them. The objects would apply cleanly, sit in the
+    # cluster, and do nothing -- a TLS floor and security headers that exist on
+    # paper only. It does not re-enable IngressRoute as a routing path; nothing in
+    # this platform creates one.
+    kubernetesCRD:
+      enabled: true
+      # Traefik v3.7.11+ (1.2.0). Empty -- the upstream default -- means a TLSOption
+      # named `default` in ANY namespace is honoured, so the TLS floor would be one
+      # apply in an application namespace away from being overridden. This value is
+      # the ONE place that namespace is set: templates/tlsoption.yaml places the
+      # TLSOption in it (and refuses to render while it is empty), so the object
+      # and the setting Traefik reads cannot drift apart.
+      defaultTLSResourcesNamespace: traefik
+
+  ingressClass:
+    enabled: false
+
+  # ---- Service: public load balancer ----
+  service:
+    type: LoadBalancer
+    # The static-IP annotations are cluster facts -- see the gitops values.
+    spec:
+      # Preserve the real client source IP, which the rate-limit middleware and
+      # access logs both depend on.
+      #
+      # SAFE ONLY WITH THE HARD TOPOLOGY SPREAD BELOW. externalTrafficPolicy:
+      # Local means the cloud LB only forwards to nodes that host a ready pod; if
+      # both replicas land on one node the LB has exactly one healthy backend and
+      # two replicas buy nothing.
+      externalTrafficPolicy: Local
+
+  ports:
+    web:
+      port: 8000
+      exposedPort: 80
+      hostPort: null
+      expose:
+        default: true
+    websecure:
+      port: 8443
+      exposedPort: 443
+      hostPort: null
+      nodePort: null
+      expose:
+        default: true
+      # Entry-point middleware: applies to every request on this entrypoint,
+      # whichever route serves it. `<namespace>-<name>@kubernetescrd` is how the CRD
+      # provider names a Middleware -- it must match middlewares[].name above and
+      # the namespace it is rendered into (the release namespace, `traefik`).
+      # (ports.<name>.http.middlewares; the subchart schema rejects it one level up.)
+      http:
+        middlewares:
+          - traefik-security-headers@kubernetescrd
+
+  additionalArguments:
+    - "--entrypoints.web.address=:8000"
+    - "--entrypoints.websecure.address=:8443"
+
+  # Upstream key names since traefik chart 41.0.0 (was logs.general / logs.access;
+  # the subchart schema now rejects `logs` outright).
+  log:
+    level: INFO
+  accessLog:
+    enabled: true
+
+  # ---- Prometheus metrics ----
+  # The pods have always SERVED Prometheus metrics: the subchart enables the
+  # exporter unconditionally on a dedicated `metrics` entrypoint (:9100). What is
+  # off by default is everything that lets Prometheus FIND it -- a Service
+  # publishing that port, and the ServiceMonitor. Without both, the edge dashboard
+  # renders and every panel says No data.
+  #
+  # FRESH-BOOTSTRAP CAVEAT: the ServiceMonitor CRD arrives with observability, four
+  # waves after this component. On a brand-new cluster set serviceMonitor.enabled
+  # false until it exists, then flip it back.
+  metrics:
+    prometheus:
+      # traefik_router_* series, which the per-route panels and the router error
+      # alert read. A pod-template change: ROLLS THE DEPLOYMENT. Safe with the
+      # 2 replicas, PDB and hard spread below.
+      addRoutersLabels: true
+      # Dedicated ClusterIP Service <fullname>-metrics:9100. The job label of
+      # every traefik_* series is this Service's name: traefik-gateway-metrics.
+      service:
+        enabled: true
+      serviceMonitor:
+        enabled: true
+      # LOAD-BEARING FOR CI, not a preference. The subchart's servicemonitor.yaml
+      # calls `fail` when .Capabilities cannot see monitoring.coreos.com/v1. Argo CD
+      # passes the destination cluster's API versions, but CI's clusterless
+      # `helm template` would fail every build. The CRD does exist on the cluster,
+      # so skipping the check costs nothing.
+      disableAPICheck: true
+
+  # ---- HA (production floor) ----
+  deployment:
+    replicas: 2
+  # HARD spread. A soft constraint (ScheduleAnyway) is a scheduling preference
+  # that never rebalances: after the infra pool grew to two nodes both replicas
+  # stayed on one. Combined with externalTrafficPolicy: Local above, soft spread
+  # turns a 2-replica gateway into a single-node SPOF that looks highly available.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+  # `pool` is the IaC-authoritative label; `agentpool` is only the AKS auto-label.
+  nodeSelector:
+    pool: infra
+  # Without this toleration the nodeSelector above schedules nowhere -- the infra
+  # pool carries taint workload=infra:NoSchedule.
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: infra
+      effect: NoSchedule
+
+  # Nothing in the cluster is reachable if the gateway is evicted, so application
+  # pods must not be able to preempt it.
+  priorityClassName: system-cluster-critical
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi

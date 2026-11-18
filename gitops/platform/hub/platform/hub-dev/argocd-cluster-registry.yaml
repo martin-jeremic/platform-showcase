@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'argocd-cluster-registry' to 'hub-dev'.
+chartPath:     argocd-cluster-registry
+chartRevision: argocd-cluster-registry-0.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   argocd-cluster-registry
+namespace:     argocd-hub
+syncWave:      "3"

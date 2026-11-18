@@ -1,0 +1,41 @@
+# Exceptions a service logged, from its own log lines (Loki ruler, LogQL).
+#
+# A RAW Loki rule-group file, shipped verbatim by templates/configmap.yaml
+# (.Files.Get, NOT tpl): the Prometheus template syntax in annotations passes
+# through to the ruler untouched.
+#
+# INPUT: the application log contract's `exception_type`, structured metadata set
+# by the collector (observability-ingest for the hub's spokes;
+# observability alloyPipeline.parseLogContract on clusters with their
+# own Loki). A tenant whose services do not follow the contract has no
+# exception_type, so this rule stays silent there -- it does not error.
+#
+# GROUPING: per cluster / namespace / service_name / exception_type. Not `pod`:
+# it is a stream label on some tenants and structured metadata on others, while
+# service_name and cluster are stream labels everywhere. `cluster` is what
+# Alertmanager routes audiences by (notifications.audiences).
+#
+# A DIGEST, NOT A PAGE: severity notice routes to the notice receiver
+# (group_interval 30m, repeat 24h, send_resolved false). The 1h window keeps a
+# chronic exception as ONE firing alert, re-sent once a day; a one-off fires
+# once and clears an hour later without a "resolved" mail; a new exception type
+# is a new alert and lands in the next digest. Evaluated every 5m -- a digest
+# needs no finer grain, and each evaluation scans an hour of the tenant's logs.
+groups:
+  - name: platform.logs.exceptions
+    interval: 5m
+    rules:
+      - alert: PlatformServiceExceptions
+        expr: |
+          sum by (cluster, namespace, service_name, exception_type) (
+            count_over_time({service_name=~".+"} | exception_type!="" [1h])
+          ) > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "{{ $labels.service_name }} logged {{ $labels.exception_type }}"
+          description: >-
+            {{ $labels.service_name }} in {{ $labels.namespace }} on
+            {{ $labels.cluster }} logged {{ $value }} {{ $labels.exception_type }}
+            in the last hour. The stack trace is in the log line body (field
+            `exception`).

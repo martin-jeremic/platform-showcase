@@ -1,0 +1,129 @@
+# stages/config-deploy-stage.yml
+#
+# Config-only redeploy (push-based dev). Re-renders the chart version that is ALREADY running,
+# with the image that is ALREADY running, against the values file of THIS commit. Nothing is
+# built and no image moves: only values change. It is what the service's CD-config pipeline runs
+# when a commit touches nothing but the env values file.
+#
+# Both the chart version and the image are read back from the Helm release itself, never
+# guessed: a config deploy must not move the image.
+#
+# Two deliberate choices:
+#
+# - No `--reuse-values`. That flag merges the new file over the previous release's values, so a
+#   key DELETED from the values file stays live until the next full CD. Instead the only values
+#   that are not in the file (the image coordinates the full CD passed with --set) are read back
+#   and passed again. The release then equals chart defaults + values file + image, exactly what
+#   the full CD renders.
+#
+# - No `kubectl rollout restart`. The charts stamp checksum/config (the hash of the rendered
+#   ConfigMap) on the pod template, so a ConfigMap change rolls the pods as part of the upgrade
+#   and `--wait` holds the step until they are ready. A values change that touches neither the
+#   ConfigMap nor the pod template (an HTTPRoute hostname, say) correctly restarts nothing. A
+#   restart on top would roll every pod twice, and a one-replica Recreate worker would go down
+#   twice.
+#
+# Placeholders are refused first (refuse-placeholders-stage.yml).
+
+parameters:
+  - name: environmentName
+    type: string
+    default: Development
+  - name: namespace
+    type: string
+  - name: chartName
+    type: string
+  - name: releaseName
+    type: string
+    default: ''
+  - name: valuesFile
+    type: string
+  - name: helmTimeout
+    type: string
+    default: 10m
+  - name: acrName
+    type: string
+    default: productacr
+  - name: armServiceConnection
+    type: string
+    default: arm-product-a
+  - name: helmVersion
+    type: string
+    default: '4.2.0'
+  - name: pool
+    type: object
+    default:
+      name: Default
+      demands: [dev-deploy]
+
+stages:
+  - template: refuse-placeholders-stage.yml
+    parameters:
+      valuesFiles:
+        - ${{ parameters.valuesFile }}
+
+  - stage: ConfigDeploy
+    displayName: Config deploy (${{ parameters.environmentName }})
+    dependsOn: RefusePlaceholders
+    jobs:
+      - deployment: Deploy
+        displayName: helm upgrade (values only)
+        environment: ${{ parameters.environmentName }}
+        pool: ${{ parameters.pool }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+
+                - task: HelmInstaller@1
+                  displayName: Install Helm ${{ parameters.helmVersion }}
+                  inputs:
+                    helmVersionToInstall: ${{ parameters.helmVersion }}
+
+                - task: AzureCLI@2
+                  displayName: Read the running release + upgrade values only
+                  env:
+                    ACR_NAME: ${{ parameters.acrName }}
+                    CHART: ${{ parameters.chartName }}
+                    RELEASE: ${{ coalesce(parameters.releaseName, parameters.chartName) }}
+                    NAMESPACE: ${{ parameters.namespace }}
+                    VALUES_FILE: ${{ parameters.valuesFile }}
+                    HELM_TIMEOUT: ${{ parameters.helmTimeout }}
+                  inputs:
+                    azureSubscription: ${{ parameters.armServiceConnection }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      REGISTRY="$ACR_NAME.azurecr.io"
+
+                      CHART_VERSION="$(helm get metadata "$RELEASE" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.version // empty')"
+                      [ -n "$CHART_VERSION" ] || { echo "##vso[task.logissue type=error]No '$RELEASE' release in '$NAMESPACE'. Run the full CD first."; exit 1; }
+
+                      VALUES="$(helm get values "$RELEASE" -n "$NAMESPACE" -o json)"
+                      IMAGE_REPO="$(jq -r '.image.repository // empty' <<< "$VALUES")"
+                      IMAGE_TAG="$(jq -r '.image.tag // empty' <<< "$VALUES")"
+                      IMAGE_DIGEST="$(jq -r '.image.digest // empty' <<< "$VALUES")"
+                      [ -n "$IMAGE_DIGEST" ] || [ -n "$IMAGE_TAG" ] || {
+                        echo "##vso[task.logissue type=error]Release '$RELEASE' records neither image.digest nor image.tag. Run the full CD first."; exit 1; }
+                      echo "Running: chart $CHART_VERSION, image ${IMAGE_REPO:-<chart default>}:${IMAGE_TAG:-} @ ${IMAGE_DIGEST:-<none>}"
+
+                      az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv \
+                        | helm registry login "$REGISTRY" --username 00000000-0000-0000-0000-000000000000 --password-stdin
+
+                      ARGS=(--namespace "$NAMESPACE" --version "$CHART_VERSION"
+                            --values "$BUILD_SOURCESDIRECTORY/$VALUES_FILE"
+                            --wait --timeout "$HELM_TIMEOUT")
+                      [ -z "$IMAGE_REPO" ]   || ARGS+=(--set-string "image.repository=$IMAGE_REPO")
+                      [ -z "$IMAGE_TAG" ]    || ARGS+=(--set-string "image.tag=$IMAGE_TAG")
+                      [ -z "$IMAGE_DIGEST" ] || ARGS+=(--set-string "image.digest=$IMAGE_DIGEST")
+                      helm upgrade "$RELEASE" "oci://$REGISTRY/helm/$CHART" "${ARGS[@]}"
+
+                - bash: kubectl get pods,configmap -n "$NAMESPACE" -l "app.kubernetes.io/instance=$RELEASE"
+                  displayName: Show what is running
+                  condition: always()
+                  env:
+                    NAMESPACE: ${{ parameters.namespace }}
+                    RELEASE: ${{ coalesce(parameters.releaseName, parameters.chartName) }}

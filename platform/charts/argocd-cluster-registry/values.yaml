@@ -1,0 +1,36 @@
+# =============================================================================
+# argocd-cluster-registry -- hub-side, declarative multi-cluster registry.
+# =============================================================================
+# Renders, per managed cluster, the ExternalSecret that assembles Argo CD's
+# secret-type=cluster Secret; optionally renders tenancy AppProjects. Lives in the
+# hub Argo CD namespace.
+# =============================================================================
+
+# Namespace where the hub Argo CD runs. Cluster Secrets MUST live here for the
+# application-controller to discover them.
+argocdNamespace: argocd-hub
+
+# The External Secrets Operator store that reads Azure Key Vault (workload
+# identity; the store is owned by the ESO installation, not by this chart).
+externalSecrets:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: azure-keyvault
+    kind: ClusterSecretStore
+
+# ── The fleet ────────────────────────────────────────────────────────────────
+# One entry per managed cluster. Every field is non-secret and safe to commit:
+# the bearer token is the Key Vault secret named by akvKey.
+#
+#  - name: remote-1                  # Argo's cluster name (destination.name)
+#    server: https://<api>:6443      # API URL the HUB can reach -- never loopback
+#    caData: "<base64 remote CA>"    # remote cluster CA (non-secret)
+#    insecure: false                 # true = skip TLS verify (lab only; omit caData)
+#    labels:                         # selectors for ApplicationSet cluster generators
+#      env: prod
+#    project: ""                     # pin this cluster to one AppProject (optional)
+#    akvKey: argocd-remote-1-token   # Key Vault secret holding the SA token
+clusters: []
+
+# ── Tenancy boundaries (AppProjects) ─────────────────────────────────────────
+projects: []

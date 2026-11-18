@@ -1,0 +1,5 @@
+# CI values: the island cluster's shape (workload identity).
+azureKeyVault:
+  workloadIdentityClientId: "44444444-4444-4444-4444-444444444444"
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  keyvaultName: kv-product-a-prod

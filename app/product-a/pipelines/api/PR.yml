@@ -1,0 +1,49 @@
+# product-a-api pull-request validation. Register as `product-a-api-pr`.
+#
+# For Azure Repos the YAML `pr:` block is ignored: what runs this pipeline is a build-validation
+# BRANCH POLICY on develop, whose path filters mirror the CI paths below. The policy is created by
+# platform/ci-templates/scripts/ado/set-branch-policies.sh from a manifest, so the two lists are kept in one
+# place and do not drift.
+#   paths: src/Api/**, charts/product-a-db/**, tests/Api.Tests/**, Directory.Build.props
+#
+# End-to-end tests are NOT part of the PR: they need the whole stack and a browser, take ~25
+# minutes, and run nightly against dev (platform/ci-templates/examples/e2e-nightly.yml). A red nightly is
+# triaged the next morning; it never blocks a merge.
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  # Merge-conflict markers, required files, pinned gitleaks. The one gate that blocks on a finding.
+  - template: stages/convention-checks-stage.yml@templates
+
+  # Locked restore, build, named hermetic suites, the EF Core "model changed without a migration"
+  # guard, coverage; hadolint and a Trivy filesystem scan of the Dockerfile's folder (warn-only).
+  - template: stages/pr-dotnet-stage.yml@templates
+    parameters:
+      dependsOn: []
+      solution: src/Api/ProductA.Api.csproj
+      suites:
+        - tests/Api.Tests/ProductA.Api.Tests.csproj
+      testFilter: Category!=RequiresDocker
+      efGuards:
+        - project: src/Api/ProductA.Api.csproj
+          context: PlatformDbContext
+        - project: src/Api/ProductA.Api.csproj
+          context: TenantDbContext
+      dockerfile: src/Api/Dockerfile
+
+  # helm lint + template of both charts with every values file (values-dev.yaml, ci/*.yaml), and
+  # the no-`range` rule.
+  - template: stages/pr-helm-stage.yml@templates
+    parameters:
+      dependsOn: []
+      charts:
+        - src/Api/helm/product-a-api
+        - charts/product-a-db

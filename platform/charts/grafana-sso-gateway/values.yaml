@@ -1,0 +1,144 @@
+# =============================================================================
+# grafana-sso-gateway -- BASE values
+# =============================================================================
+# Sync wave 2 -- BEFORE observability. It used to sync after it, which only ever
+# worked because Grafana already existed on the clusters that ran it. The
+# dependency runs the other way: this release creates the Secret that Grafana
+# renders a NON-optional envFrom to, so from zero Grafana came up first and sat in
+# CreateContainerConfigError. The HTTPRoute pointing at a not-yet-existing Service
+# is harmless: it answers 503 until observability lands.
+#
+# TWO STRUCTURAL CHANGES FROM THE FORK:
+#
+#   1. IT NO LONGER CREATES A GATEWAY OR A CERTIFICATE. Everything is served on one
+#      host per cluster, and the traefik chart owns that Gateway and its
+#      Certificate. A second Gateway on the same host and port would be a competing
+#      owner of the edge. Both templates are DELETED; this chart only attaches
+#      HTTPRoutes to the existing Gateway.
+#
+#   2. IT CANNOT HOLD THE OIDC CLIENT SECRET. The fork rendered
+#      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET from a values key, guarded by a `fail`
+#      that demanded the value be passed at install time. A values key that accepts
+#      a credential eventually holds one -- which is exactly how a live DNS token
+#      reached git in the cert-manager chart. The key is gone; the credential comes
+#      from a separately seeded Secret.
+
+# Public hostname. Must be a SAN on the certificate the traefik chart issues.
+domain: ""
+
+gateway:
+  # REFERENCED, never created. Must match the traefik chart's values.
+  name: traefik-gateway
+  namespace: traefik
+  # The HTTPS listener only.
+  listenerName: websecure
+
+# ---------------------------------------------------------------------
+# HTTPRoutes -- one per backend
+# ---------------------------------------------------------------------
+# Service names come from the observability release, and EVERY one of them is
+# pinned by a fullnameOverride in that chart -- including the kube-prometheus-stack
+# subchart. An earlier comment claimed they were release-prefixed; they are not,
+# and that mistake pointed the grafana route at a Service that never existed.
+# Check reality rather than deriving the name:
+#   kubectl -n observability get svc
+#
+# None of these may use PathPrefix "/" -- the apex is reserved for the application.
+routes:
+  grafana:
+    enabled: true
+    pathPrefix: /monitoring/grafana
+    service: kube-prom-stack-grafana
+    port: 80
+  # Prometheus and Loki HAVE NO AUTHENTICATION OF THEIR OWN. Grafana is behind
+  # Keycloak; these two are not, so publishing them puts unauthenticated read access
+  # to every metric and log on the public host. Grafana queries both internally, so
+  # the only thing these buy is convenience. Left DISABLED.
+  prometheus:
+    enabled: false
+    pathPrefix: /monitoring/prometheus
+    service: kube-prom-stack-kube-prome-prometheus
+    port: 9090
+  loki:
+    enabled: false
+    pathPrefix: /monitoring/loki
+    service: loki
+    port: 3100
+
+# ---------------------------------------------------------------------
+# Keycloak OIDC for Grafana
+# ---------------------------------------------------------------------
+# This chart renders a Secret of GF_AUTH_GENERIC_OAUTH_* env vars holding the
+# NON-SENSITIVE OIDC configuration. Grafana is owned by the observability release.
+#
+# THE CLIENT SECRET IS NOT HERE. It is hand-seeded as `grafana-oidc` from the
+# gitops setup/ folder, because the Grafana pod mounts no SecretProviderClass
+# volume and the CSI driver only syncs while a pod does.
+#
+# So Grafana loads TWO Secrets through DIFFERENT mechanisms -- this chart's Secret
+# has env-var-named keys (envFrom works), the hand-seeded one has key
+# `client-secret` (NOT an env var name, so it needs an explicit key->name mapping).
+# In the observability chart's values:
+#     kubePromStack:
+#       grafana:
+#         envFromSecrets:
+#           - name: grafana-sso-oidc            # this chart (config)
+#         envValueFrom:
+#           GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+#             secretKeyRef:
+#               name: grafana-oidc              # hand-seeded (the credential)
+#               key: client-secret
+# Loading the credential via envFromSecrets instead injects a dead `client-secret`
+# env var and NO client secret -- which fails at the moment a user clicks
+# "Sign in with Keycloak", not at deploy time.
+oidc:
+  enabled: true
+
+  # Secret THIS chart creates (config only, no credential).
+  secretName: grafana-sso-oidc
+  # Set to skip creating it and manage the whole thing yourself.
+  existingSecret: ""
+
+  clientId: grafana
+
+  keycloak:
+    # Per cluster, e.g. https://<host>/keycloak
+    baseUrl: ""
+    # A dedicated identity-brokering realm that fronts the real user realm(s) as an
+    # OIDC IdP. Grafana OSS speaks to exactly ONE provider, so every login flow goes
+    # through here -- the seam that lets a second user realm be added without
+    # touching Grafana.
+    realm: grafana
+
+  grafana:
+    # Must equal Grafana's own root_url (observability chart) or the redirect URI
+    # will not match what Keycloak has registered, and login fails with an
+    # invalid_redirect_uri that names neither side.
+    rootUrl: ""
+    displayName: "Keycloak SSO"
+    scopes: "openid email profile offline_access roles"
+    allowSignUp: true
+    autoLogin: false
+    usePkce: true
+    useRefreshToken: true
+
+    loginAttributePath: "preferred_username"
+    emailAttributePath: "email"
+    nameAttributePath: "name"
+    # Scope is carried by Keycloak GROUP membership, surfaced as a multivalued
+    # `groups` claim by the broker realm. Without a group-membership mapper the
+    # claim is absent and every user is a Viewer regardless of their groups.
+    groupsAttributePath: "groups"
+
+    # not_null(groups, `[]`) defaults a missing claim to an empty list, so a
+    # groupless user becomes Viewer instead of hard-failing the JMESPath.
+    roleAttributePath: "contains(not_null(groups, `[]`), 'grafana-system-admin') && 'GrafanaAdmin' || contains(not_null(groups, `[]`), 'grafana-admins') && 'Admin' || 'Viewer'"
+    allowAssignGrafanaAdmin: true
+    # false: a user with no mapped group still logs in as Viewer. With true they are
+    # denied outright, which turns a missing group mapper into "nobody can log in".
+    roleAttributeStrict: false
+
+    # Per cluster. On a hub serving several tenants, scope groups map to separate
+    # Grafana Orgs (data isolation); on a single-tenant cluster leave it unset --
+    # Orgs live only in Grafana's SQLite DB, in no manifest.
+    orgMapping: ""

@@ -1,0 +1,18 @@
+# product-b-worker: drains the outbox and the scheduled-command table. No HTTP traffic is served;
+# the port exists for the probes only.
+
+fullnameOverride: ""
+
+image:
+  repository: productacr.azurecr.io/product-b-worker
+  digest: ""
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 192Mi
+  limits:
+    memory: 384Mi
+
+secretName: product-b-worker-secrets

@@ -1,0 +1,204 @@
+# product-a-api: structural defaults only. Stage, demo and prod values live in gitops/apps
+# (apps/product-a-api/<env>/values.yaml + image.yaml written by the promotion), and Argo CD reads
+# nothing else. The one values file next to this chart is values-dev.yaml, for the push-based dev
+# deploy. One place per fact and environment.
+#
+# Keys marked REQUIRED have no default on purpose: the chart refuses to render without them, which
+# surfaces in CI (render against the gitops values) or as an Argo ComparisonError, never as a pod.
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 2
+
+image:
+  # Full reference without tag or digest. The push-based deploy stages set exactly this key
+  # (image.repository=<registry>/<name>); the GitOps path keeps this default.
+  repository: productacr.azurecr.io/product-a-api
+  # sha256:<64 hex>. REQUIRED; see the image helper in _helpers.tpl for why there is no tag.
+  digest: ""
+  # IfNotPresent, not Always: a digest is immutable, so Always buys nothing but a registry
+  # dependency on every pod start.
+  pullPolicy: IfNotPresent
+
+# Empty on AKS: nodes pull with the kubelet identity (AcrPull on the registry), so there is no pull
+# secret to create, sync or rotate (the source charts carried an `acr-auth` secret everywhere).
+# The on-prem MicroK8s spoke has no kubelet identity; there the platform layer creates one
+# namespace pull secret and the environment's values name it here.
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # The app never calls the Kubernetes API, so no API token is mounted. Neither identity below
+  # needs it: the CSI driver requests its own audience-scoped token through the CSIDriver's
+  # tokenRequests, and the workload-identity webhook projects the federated token separately.
+  automount: false
+
+# Workload identity: this service account is federated with ONE user-assigned identity per app and
+# environment, which holds "Key Vault Secrets User" on that environment's vault and nothing else.
+workloadIdentity:
+  enabled: false
+  clientId: ""          # REQUIRED when enabled; the identity's client id, not its object id
+
+podAnnotations: {}
+podLabels: {}
+
+# Pod Security "restricted". Non-root is enforced, not assumed: the kubelet refuses to start the
+# container unless the image's numeric USER is non-zero. The UID itself lives in the Dockerfile.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# 5 s preStop + up to 20 s Kestrel drain (HostOptions.ShutdownTimeout in Program.cs) < 30 s.
+terminationGracePeriodSeconds: 30
+preStopSleepSeconds: 5
+
+# startup: failureThreshold x periodSeconds is the boot budget before liveness starts counting.
+# readiness: gates Service endpoints; checks the database. liveness: RESTARTS the container, so it
+# never checks a dependency.
+startupProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 5
+  failureThreshold: 30
+readinessProbe:
+  enabled: true
+  path: /health/ready
+  periodSeconds: 10
+  failureThreshold: 3
+livenessProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 20
+  failureThreshold: 3
+
+# No CPU limit by default: a CPU limit throttles the .NET thread pool in bursts and shows up as
+# latency, not as an error. The memory limit is the one that protects the node.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+otel:
+  enabled: false
+  endpoint: ""          # e.g. http://alloy.monitoring.svc.cluster.local:4317
+
+# ConfigMap (templates/configmap.yaml). Written here as readable YAML; the chart turns each group
+# into ONE plain-JSON environment variable with `toJson` (never Base64, never hand-written JSON
+# strings in values), which the app binds onto its options and validates at start-up.
+#
+# Every key is written out in the template; nothing is rendered with `range`. That is a lesson,
+# not a style: several workers in the real service were registered and running in every
+# environment while their key was missing from the chart, so no values file could ever turn them
+# on, and nobody noticed for weeks. An explicit key list makes "this setting reaches the pod" a
+# reviewable fact.
+config:
+  environment: ""       # REQUIRED: Dev | Stage | Demo | Production
+  logLevel: Information
+  identity:             # REQUIRED. The client secret is a Key Vault object, not config.
+    authority: ""
+    audience: ""
+    clientId: ""
+  broker:               # REQUIRED. The password is a Key Vault object.
+    host: ""
+    port: "5672"
+    virtualHost: "/"
+    username: ""
+  # REQUIRED, and the reason is the instructive one: the real client defaulted to
+  # http://localhost:8000 (the developer's standalone run), so an empty value did not fail. It
+  # called localhost INSIDE the pod and every request died with connection-refused.
+  moduleBaseUrl: ""
+  # A CONFIG flag that makes a SECRET mandatory: when enabled, the Key Vault object
+  # product-a-api--blob-connection is requested too (see secretproviderclass.yaml).
+  blobStorage:
+    enabled: false
+    accountUrl: ""
+    container: ""
+  # Gates destructive admin endpoints (tenant purge, re-index) in addition to the role check.
+  # Rendered as "false" when false. It is never omitted, because an omitted flag lets the app's own
+  # default decide.
+  adminOperations:
+    enabled: false
+
+# Secrets: Azure Key Vault -> Secrets Store CSI driver -> synced Kubernetes Secret -> env vars.
+# Vault object names: <app>--<key>.
+azureKeyVault:
+  enabled: false
+  keyvaultName: ""      # REQUIRED when enabled: kv-product-a-<env>
+  tenantId: ""          # REQUIRED when enabled
+  secretProviderClassName: product-a-api-kv
+  # The Kubernetes Secret the driver syncs into. Reloader watches exactly this name.
+  syncedSecretName: product-a-api-secrets
+
+gateway:
+  enabled: false
+  name: traefik-gateway
+  namespace: traefik
+  # Pins the route to the TLS listener; without it the route also binds plain HTTP on :80.
+  sectionName: websecure
+
+# Two explicit rules, each with its OWN rewrite (no `range`): the API prefix is rewritten to /api,
+# while the push hub keeps its own path. A rule without a rewrite block uses route.rewrite.
+route:
+  enabled: false
+  hostnames: []
+  path: /admin/api
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /api
+  hubs:
+    enabled: false
+    path: /admin/hubs
+    rewrite:
+      enabled: true
+      replacePrefixMatch: /hubs
+
+# While enabled is false the Deployment uses replicaCount; once on, the HPA owns the count.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 75
+
+# Recommendation only. updateMode "Off" lets VPA compute requests from real usage without
+# evicting pods; a human copies the numbers into `resources`. Auto mode and an HPA on CPU would
+# fight over the same signal, and Auto evicts at moments nobody chose.
+verticalPodAutoscaler:
+  enabled: false
+  minAllowed:
+    cpu: 50m
+    memory: 128Mi
+  maxAllowed:
+    cpu: "1"
+    memory: 2Gi
+
+# Added in the showcase: the real charts had neither a PDB nor spread constraints, so a node drain
+# could evict every replica at once and the scheduler was free to stack them on one node.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  # ScheduleAnyway: spread when possible, but never leave a pod Pending on a small cluster.
+  whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

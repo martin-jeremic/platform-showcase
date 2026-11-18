@@ -1,0 +1,8 @@
+# <pipeline-name>|<yaml path in the repo>
+# CI pipelines are registered first by the script regardless of their position here.
+payments-api-ci|pipelines/api/CI.yml
+payments-api-cd|pipelines/api/CD.yml
+payments-api-pr|pipelines/api/PR.yml
+payments-admin-web-ci|pipelines/admin-web/CI.yml
+payments-admin-web-cd|pipelines/admin-web/CD.yml
+payments-admin-web-pr|pipelines/admin-web/PR.yml

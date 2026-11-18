@@ -1,0 +1,25 @@
+# Committed, NON-SECRET settings for prod. Used as-is:
+#   tofu plan -var-file prod.tfvars.example
+#
+# This replaces a git-ignored prod.auto.tfvars the environment used to depend on:
+# a value there silently overrode the committed default (kubernetes_version among
+# them) with something no review had seen. Anything that genuinely differs per
+# operator (their own IP for pg_admin_client_ips) goes in an untracked
+# *.auto.tfvars; anything that defines prod goes here or in variables.tf.
+
+subscription_id        = "33333333-3333-3333-3333-333333333333"
+shared_subscription_id = "22222222-2222-2222-2222-222222222222"
+
+shape        = "A"
+ephemeral_os = true
+
+# Off until launch. Flipping it is in-place; read the precondition in postgres.tf.
+ha = false
+
+# The CI agent pool's egress and the operators' office range. Documentation ranges.
+api_server_authorized_ip_ranges = ["198.51.100.0/24", "203.0.113.7/32"]
+
+# Only once kv-product-a-prod exists (data source would fail the plan otherwise).
+enable_key_vault_access = true
+
+pg_sku = "B_Standard_B1ms"

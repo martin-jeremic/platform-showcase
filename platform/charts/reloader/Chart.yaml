@@ -1,0 +1,36 @@
+apiVersion: v2
+name: reloader
+description: >-
+  Platform Reloader chart. Umbrella chart that installs the upstream Stakater
+  Reloader controller -- a cluster-wide operator that watches ConfigMaps and
+  Secrets and rolls the workloads consuming them when they change. Configured
+  fleet-wide (autoReloadAll) and HA, because the chart this was forked from was
+  installed with base values only on the demo cluster and was therefore inert:
+  installed, running, and restarting nothing.
+type: application
+
+# Version of THIS umbrella chart. Bump on any change to templates or defaults.
+#
+# 1.0.1 -- reloader 2.2.14 -> 2.2.19 (Reloader v1.4.19 -> v1.4.23); values.yaml
+#   stops repeating the image tag (the subchart pins it to its own appVersion),
+#   and the controller gets priorityClassName system-cluster-critical, which the
+#   production floor requires and which was missing.
+version: 1.0.1
+
+# Reloader version shipped by the pinned subchart.
+appVersion: "v1.4.23"
+
+keywords:
+  - reloader
+  - configmap
+  - secret
+  - rolling-restart
+home: https://github.com/stakater/Reloader
+sources:
+  - https://github.com/stakater/Reloader
+
+dependencies:
+  - name: reloader
+    version: "2.2.19"
+    repository: "https://stakater.github.io/stakater-charts"
+    condition: reloader.enabled

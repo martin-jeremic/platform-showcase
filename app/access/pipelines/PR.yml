@@ -1,0 +1,39 @@
+# access-api pull-request gate into main. Register as `access-api-pr`.
+#
+# Unit and integration suites run as SEPARATE named suites, each with its own results and coverage
+# file: a red integration suite (a broken mapping, a migration that no longer applies) is visible as
+# such instead of hiding in one merged "tests failed". The integration suite here uses an in-memory
+# host and test doubles, so it is hermetic and belongs in the PR; suites that need SQL Server run
+# against docker-compose.dev.yml locally and nightly, never on the shared PR agents.
+#
+# The private NuGet feed must be authenticated by a NuGetAuthenticate@1 step (a credential provider
+# for the restore), never by a credential in nuget.config. pr-dotnet-stage.yml has no such step yet:
+# listed in the README's KNOWN-GAPS for the template owner.
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  - template: stages/convention-checks-stage.yml@templates
+
+  - template: stages/pr-dotnet-stage.yml@templates
+    parameters:
+      dependsOn: []
+      solution: Access.sln
+      suites:
+        - tests/Access.Tests.Unit/Access.Tests.Unit.csproj
+        - tests/Access.Tests.Integration/Access.Tests.Integration.csproj
+      collectCoverage: true
+      dockerfile: api/Dockerfile
+
+  - template: stages/pr-helm-stage.yml@templates
+    parameters:
+      dependsOn: []
+      charts:
+        - helm/access-api

@@ -1,0 +1,37 @@
+{{- /*
+Non-sensitive configuration. Each config group becomes ONE plain-JSON value, built here with
+`toJson` from readable YAML. That gives three guarantees at once: the JSON is always valid (no
+hand-written quoting in a values file), it is never Base64 (`kubectl get cm -o yaml` shows the real
+configuration), and the app binds each group onto its options and validates it at start-up.
+
+Why plain JSON, not Base64: values used to travel Base64-encoded, and a binder that "helpfully"
+decoded both forms let encoded blobs creep back in unnoticed. The app now REFUSES anything that is
+not JSON (the pod crash-loops naming the variable), so the chart must never encode.
+
+Explicit keys, no `range`: see the `config:` comment in values.yaml.
+*/ -}}
+{{- $c := .Values.config }}
+{{- $id := $c.identity }}
+{{- $mq := $c.broker }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "product-a-api.fullname" . }}-config
+  labels:
+    {{- include "product-a-api.labels" . | nindent 4 }}
+  annotations:
+    {{- /* Pods roll through checksum/config on the pod template (Argo applies it like any other
+         field). Reloader must ignore this ConfigMap: its restart stamp raced Argo's sync and was
+         undone, which looked like a restart that happened and then un-happened. */}}
+    reloader.stakater.com/ignore: "true"
+data:
+  API: {{ dict "Name" (include "product-a-api.fullname" .) "Environment" (required "config.environment is required" $c.environment) | toJson | quote }}
+  IDENTITY: {{ dict "Authority" (required "config.identity.authority is required" $id.authority) "Audience" (required "config.identity.audience is required" $id.audience) "ClientId" (required "config.identity.clientId is required" $id.clientId) | toJson | quote }}
+  BROKER: {{ dict "Host" (required "config.broker.host is required" $mq.host) "Port" ($mq.port | toString) "VirtualHost" $mq.virtualHost "Username" (required "config.broker.username is required" $mq.username) | toJson | quote }}
+  MODULE: {{ dict "BaseUrl" (required "config.moduleBaseUrl is required: an empty value makes the client call localhost inside the pod" $c.moduleBaseUrl) | toJson | quote }}
+  {{- if $c.blobStorage.enabled }}
+  BLOBSTORAGE: {{ dict "AccountUrl" (required "config.blobStorage.accountUrl is required when enabled" $c.blobStorage.accountUrl) "Container" (required "config.blobStorage.container is required when enabled" $c.blobStorage.container) | toJson | quote }}
+  {{- end }}
+  Logging__LogLevel__Default: {{ $c.logLevel | default "Information" | quote }}
+  {{- /* Rendered as "true" OR "false", never omitted: an omitted flag lets the app's default decide. */}}
+  ALLOW_ADMIN_OPERATIONS: {{ $c.adminOperations.enabled | toString | quote }}

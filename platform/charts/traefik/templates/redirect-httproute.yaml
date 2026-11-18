@@ -1,0 +1,55 @@
+{{- /*
+HTTP -> HTTPS redirect.
+
+The forked chart had templates for gateway/gatewayclass/httproutes/certificate/
+referencegrant and nothing else -- so port 80 either served plaintext or nothing
+at all. For a public production edge a redirect is not a tweak: it is the
+difference between "http://<host> works" and "http://<host> is a dead port that
+users read as an outage".
+
+A Gateway-API-native redirect: an HTTPRoute attached to the plaintext `web`
+listener whose only rule is a RequestRedirect filter. No backendRefs -- the
+Gateway answers directly, nothing is proxied, so no Service is involved and the
+redirect works before any application exists.
+
+Why sectionName matters: without it the route attaches to EVERY listener,
+including websecure, and HTTPS traffic would be redirected to itself in a loop.
+
+The mirror image of that rule is why application routes must name `websecure`:
+an application route on PathPrefix / with no sectionName ALSO binds to `web`, and
+there it ties with this route for the same host and path. Which one Traefik builds
+then depends on route age (v3.7.14+ builds only the older of two tied routes), so
+http://<host>/ alternated between the 301 and a plaintext 200 until the app route
+was pinned to websecure.
+*/ -}}
+{{- if .Values.redirect.enabled }}
+{{- $web := .Values.gateway.listeners.web }}
+{{- if not $web.enabled }}
+{{- fail "redirect.enabled=true but gateway.listeners.web.enabled=false -- there is no plaintext listener to redirect FROM" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.redirect.name }}
+  namespace: {{ include "platform-traefik.gatewayNamespace" . }}
+  labels:
+    {{- include "platform-traefik.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+      namespace: {{ include "platform-traefik.gatewayNamespace" . }}
+      # Bind to the plaintext listener ONLY.
+      sectionName: {{ $web.name }}
+  hostnames:
+    {{- toYaml (required "redirect.hostnames is required: the host(s) to redirect, normally the websecure listener's hostname" .Values.redirect.hostnames) | nindent 4 }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            # 301 (permanent), so browsers and intermediaries stop re-requesting
+            # over plaintext. Use 302 only while testing.
+            statusCode: {{ .Values.redirect.statusCode }}
+{{- end }}

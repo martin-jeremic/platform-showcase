@@ -1,0 +1,23 @@
+# Registers the OCI Helm registry so Argo can pull the service charts
+# (productacr.azurecr.io/helm/<svc>) named by the first source of each generated Application.
+#
+# `enableOCI` MUST be the string "true", and `url` MUST match the chart repoURL in the appsets
+# (no oci:// prefix there, none here). Use a pull-only identity: an ACR scope-map token or a
+# service principal holding AcrPull. Template only: never commit a filled-in copy.
+#
+#   kubectl -n argocd-hub apply -f repo-helm-acr.yaml   (or: bash ../setup.sh)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-productacr-helm
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: helm
+  name: productacr
+  url: productacr.azurecr.io/helm
+  enableOCI: "true"
+  username: REPLACE_ME   # token name or service principal app id
+  password: REPLACE_ME   # token password or service principal secret

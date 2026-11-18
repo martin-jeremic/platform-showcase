@@ -1,0 +1,25 @@
+# Single-node cluster: the hard topology spread (DoNotSchedule) would leave every
+# second replica Pending, so this cluster runs one replica of each and no PDB.
+gateway:
+  listeners:
+    websecure:
+      hostname: dev.example.com
+certificate:
+  dnsNames:
+    - dev.example.com
+redirect:
+  hostnames:
+    - dev.example.com
+traefik:
+  # No cloud load balancer on-prem: an edge proxy forwards to the node's ports.
+  service:
+    type: NodePort
+  ports:
+    web:
+      nodePort: 30080
+    websecure:
+      nodePort: 30443
+  deployment:
+    replicas: 1
+  podDisruptionBudget:
+    enabled: false

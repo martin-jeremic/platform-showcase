@@ -1,0 +1,107 @@
+# AppProject for the island's platform layer.
+#
+# Scoped to ONE destination with explicit namespace and cluster-resource allowlists,
+# rather than the '*' the hub's per-cluster projects use. On a hub that manages a
+# fleet '*' is a pragmatic choice; here there is one cluster and a known, finite set
+# of components, so the allowlist costs little to maintain and turns "a compromised
+# or mistaken chart can create anything anywhere" into "it cannot".
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: product-a-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Product A platform layer on aks-product-a-prod (in-cluster Argo CD)
+
+  sourceRepos:
+    # The charts, at pinned per-chart git tags.
+    - https://dev.azure.com/example-org/platform/_git/org-platform
+    # This repo: the appset, the descriptors, the values ($values) and dashboards.
+    - https://dev.azure.com/example-org/product-a/_git/product-a-platform-gitops
+
+  destinations:
+    # In-cluster only, namespaces enumerated: a chart cannot deploy into the
+    # application namespace, or into kube-system beyond what rbac needs.
+    - server: https://kubernetes.default.svc
+      namespace: secrets-store-csi
+    - server: https://kubernetes.default.svc
+      namespace: cert-manager
+    - server: https://kubernetes.default.svc
+      namespace: traefik
+    - server: https://kubernetes.default.svc
+      namespace: reloader
+    - server: https://kubernetes.default.svc
+      namespace: rabbitmq
+    - server: https://kubernetes.default.svc
+      namespace: infrastructure
+    - server: https://kubernetes.default.svc
+      namespace: keycloak
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+    - server: https://kubernetes.default.svc
+      namespace: cluster-test
+    - server: https://kubernetes.default.svc
+      namespace: observability
+    # rbac's Application destination. Nothing is created here -- every object that
+    # chart renders is cluster-scoped or lands in its own namespace -- but Argo CD
+    # requires a destination namespace.
+    - server: https://kubernetes.default.svc
+      namespace: kube-system
+    # rbac CREATES the application namespace, so the project must permit it.
+    - server: https://kubernetes.default.svc
+      namespace: product-a
+
+  # Cluster-scoped resources these charts legitimately create. Anything not listed
+  # is denied, which is the point: an allowlist that has to be extended
+  # deliberately beats a chart quietly creating a ClusterRoleBinding nobody reviewed.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    # Gateway API + traefik.io (traefik), cert-manager.io, secrets-store.csi.x-k8s.io,
+    # monitoring.coreos.com (observability).
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: cert-manager.io
+      kind: ClusterIssuer
+    - group: gateway.networking.k8s.io
+      kind: GatewayClass
+    # The Retain StorageClass owned by the wave-0 chart.
+    - group: storage.k8s.io
+      kind: StorageClass
+    - group: storage.k8s.io
+      kind: CSIDriver
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    # The Gateway API safe-upgrades policy (traefik chart >= 1.2.0). MUST be listed
+    # before that chart version syncs, or the sync fails "not permitted in project".
+    - group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicy
+    - group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicyBinding
+    # Not created today (the system-* classes are built in); listed so a custom
+    # class later is not a mysterious permission failure.
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+    - group: apiregistration.k8s.io
+      kind: APIService
+
+  # Namespaced resources: unrestricted. The destination allowlist already bounds
+  # WHERE they can land, and enumerating every namespaced kind a dozen charts need
+  # would be a list that fails closed on every chart upgrade.
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  # The hand-seeded bootstrap Secrets in argocd, cert-manager and observability are
+  # deliberately unmanaged; flagging them as orphans would train people to ignore
+  # the warning.
+  orphanedResources:
+    warn: false

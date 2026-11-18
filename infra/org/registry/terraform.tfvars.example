@@ -1,0 +1,6 @@
+# Optional. Every default matches the live registries and nothing here is secret.
+# Do NOT override `registries` or `role_assignments` here: the committed defaults
+# are the managed set, and a git-ignored copy would hide access changes from review.
+
+# subscription_id = "22222222-2222-2222-2222-222222222222"
+# tenant_id       = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'reloader' to 'product-a-stage'.
+chartPath:     reloader
+chartRevision: reloader-1.0.1   # pinned git tag -- the pin that makes rollback possible
+releaseName:   reloader
+namespace:     reloader
+syncWave:      "3"

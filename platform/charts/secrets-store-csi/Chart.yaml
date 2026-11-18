@@ -1,0 +1,47 @@
+apiVersion: v2
+name: secrets-store-csi
+description: >-
+  Platform Secrets Store CSI chart. Umbrella chart that installs the upstream
+  Secrets Store CSI Driver (kubernetes-sigs) together with the Azure Key Vault
+  provider, tuned for SECRET ROTATION -- pull secrets from the cluster's Key Vault
+  and keep them fresh instead of committing long-lived static Secrets. Also owns
+  the cluster-scoped Retain StorageClass every stateful chart references, because
+  sync wave 0 is the only point guaranteed to precede all of them.
+type: application
+
+# Version of THIS umbrella chart. Bump on any change to templates or defaults.
+#
+# 1.0.1 -- driver 1.6.0 -> 1.6.1 (the provider stays 1.8.2), and both node
+#   DaemonSets move from system-cluster-critical to system-node-critical. A node
+#   plugin cannot run anywhere but its own node, so on a node full of
+#   cluster-critical pods it must be the one that preempts, not the one that waits:
+#   at the same tier the scheduler has no victim and pods on that node hang
+#   mounting secrets. See values.yaml.
+version: 1.0.1
+
+# App version reflects the Azure provider shipped by the pinned subchart.
+appVersion: "1.8.2"
+
+keywords:
+  - secrets-store-csi-driver
+  - azure-key-vault
+  - secret-rotation
+  - workload-identity
+home: https://secrets-store-csi-driver.sigs.k8s.io/
+sources:
+  - https://github.com/kubernetes-sigs/secrets-store-csi-driver
+  - https://github.com/Azure/secrets-store-csi-driver-provider-azure
+
+dependencies:
+  # The node DaemonSet that mounts secrets and rotates them.
+  - name: secrets-store-csi-driver
+    version: "1.6.1"
+    repository: "https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts"
+    condition: secrets-store-csi-driver.enabled
+  # Azure Key Vault provider. This chart also bundles its OWN copy of the driver
+  # (gated by `secrets-store-csi-driver.install`); values.yaml disables that copy
+  # because the driver is installed above at an explicit version.
+  - name: csi-secrets-store-provider-azure
+    version: "1.8.2"
+    repository: "https://azure.github.io/secrets-store-csi-driver-provider-azure/charts"
+    condition: csi-secrets-store-provider-azure.enabled

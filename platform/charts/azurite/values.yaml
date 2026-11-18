@@ -1,0 +1,101 @@
+# azurite -- BASE values (shared across all clusters)
+#
+# The Azure Storage emulator, standing in for a real Storage account on clusters that
+# do not have one (the on-prem stage spoke). Exposure and storage are per cluster and
+# live in the gitops values.
+#
+# The defaults are intentionally the SAFE ones -- ClusterIP, dynamically provisioned
+# storage -- so a values-less install cannot claim a load-balancer address or assume
+# a directory exists on some node.
+
+replicaCount: 1        # single writer: azurite's LokiJS database tolerates exactly one
+
+image:
+  repository: mcr.microsoft.com/azure-storage/azurite
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to Chart.appVersion
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Startup flags -- assembled into the container command by azurite.command.
+# ---------------------------------------------------------------------------
+azurite:
+  # Relaxed validation. Azurite is strict about headers that real Azure tolerates;
+  # without this the .NET SDK clients get spurious 4xx.
+  loose: true
+  skipApiVersionCheck: true
+
+  # LOAD-BEARING. Forces path-style URL parsing -- the account is taken from the URL
+  # PATH (/devstoreaccount1) instead of the hostname (devstoreaccount1.blob.<...>).
+  # Without it azurite only answers correctly on localhost, and every consumer that
+  # reaches it by Service DNS name or VIP gets 400/404 on real requests.
+  disableProductStyleUrl: true
+
+  # Debug log destination. /dev/stdout puts request logs in `kubectl logs`, which is
+  # the only reason blob failures here are diagnosable at all. A file under /data
+  # grows inside the volume unbounded.
+  debug: "/dev/stdout"
+
+  blobHost: "0.0.0.0"
+  queueHost: "0.0.0.0"
+  tableHost: "0.0.0.0"
+
+  # Data directory. Must match the volumeMount.
+  location: "/data"
+
+  extraArgs: ""
+
+service:
+  # ClusterIP by default. A cluster that needs workstation access (Storage Explorer,
+  # azcopy) switches to LoadBalancer and requests a VIP via annotations:
+  #   annotations:
+  #     metallb.io/loadBalancerIPs: "10.0.0.245"
+  # Preferred over spec.loadBalancerIP (deprecated upstream since 1.24); setting
+  # BOTH is redundant: MetalLB takes the annotation and ignores the field silently.
+  type: ClusterIP
+  annotations: {}
+  loadBalancerIP: ""
+  blobPort: 10000
+  queuePort: 10001
+  tablePort: 10002
+  nodePorts: {}
+
+persistence:
+  enabled: true
+  # Required. On-prem: the node's dynamic hostpath class; AKS: platform-retain.
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 5Gi
+  # A pre-existing PVC to adopt -- how a volume left behind by an earlier install is
+  # taken over without moving data.
+  existingClaim: ""
+
+# Requests, and a GENEROUS memory limit. Azurite keeps its blob metadata database in
+# memory and it only grows, so a tight ceiling turns ordinary growth into an
+# OOMKill loop -- size the limit for months of growth, and watch the
+# PlatformContainerMemoryNearLimit alert.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# No priorityClassName on purpose: a test-data emulator should be among the first
+# things evicted under node pressure.
+
+# Left empty on purpose: the upstream image's entrypoint runs as uid 0, which is what
+# makes a freshly provisioned volume (root:root 0755) writable. Forcing a non-root
+# runAsUser here without also fixing directory ownership breaks the mount with EACCES.
+securityContext: {}
+podSecurityContext: {}

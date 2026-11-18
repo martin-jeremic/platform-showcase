@@ -1,0 +1,36 @@
+apiVersion: v2
+name: rabbitmq
+description: >-
+  RabbitMQ message broker -- the one platform-owned broker. StatefulSet with
+  persistent storage on a Retain StorageClass, credentials from Azure Key Vault
+  over the Secrets Store CSI driver using WORKLOAD IDENTITY (never the kubelet
+  identity by default), and a headless Service for cluster-internal AMQP and
+  management endpoints. Serves both platform traffic (Keycloak's event SPI) and
+  application traffic, separated by vhost and user. Replaces two competing
+  brokers: a platform chart deployed elsewhere, and a hand-installed chart that
+  carried plaintext passwords for four environments.
+type: application
+
+# 1.2.0 -- RabbitMQ 3.13.7 -> 4.2.9, the FIRST of two hops to 4.4.x, and the end of
+#   the floating `3-management` tag (it resolved to 3.13.7; now an exact tag).
+#   4.4.x accepts upgrades only from 4.2.x/4.3.x, and 3.13.x only reaches 4.0-4.2,
+#   so 4.2.9 (last 4.2 patch) is the mandatory stop. 4.3 removed Mnesia, so 4.4
+#   boots only on a node whose 4.x feature flags -- khepri_db included -- are
+#   already enabled. values.yaml featureFlags.autoEnableAll does that on every
+#   start, as the RabbitMQ Cluster Operator does (autoEnableAllFeatureFlags).
+#   Checked on the live broker before choosing this path: every stable 3.13 flag
+#   enabled, no deprecated feature in use, all queues classic + durable, no
+#   mirroring, no global QoS.
+#   IRREVERSIBLE: 4.x data cannot be opened by 3.13, and enabling a flag cannot be
+#   undone. The next release (appVersion 4.4.x) must not merge until this one is
+#   Synced and `rabbitmqctl list_feature_flags name state` shows every flag enabled.
+version: 1.2.0
+# The broker version: the image tag defaults to this. Exact tag, never floating.
+appVersion: "4.2.9-management"
+
+keywords:
+  - rabbitmq
+  - amqp
+  - messaging
+sources:
+  - https://github.com/rabbitmq/rabbitmq-server

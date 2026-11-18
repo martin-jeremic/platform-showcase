@@ -1,0 +1,68 @@
+# product-a-db: the schema migration Job. See templates/migration-job.yaml for the full rationale.
+
+fullnameOverride: ""
+
+image:
+  # The API image, not a separate "migration image": the migrations ship inside the build that
+  # needs them. The push-based migration stage sets this key to <registry>/<name>.
+  repository: productacr.azurecr.io/product-a-api
+  # THE SAME digest product-a-api carries for this release (written by the same promotion commit).
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Empty on AKS (kubelet identity pulls); the on-prem spoke names its namespace pull secret here.
+imagePullSecrets: []
+
+serviceAccount:
+  automount: false
+
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# OWN SecretProviderClass and synced Secret names, never product-a-api's (see
+# templates/secretproviderclass.yaml). The Key Vault OBJECT is the same one the API reads.
+azureKeyVault:
+  enabled: false
+  keyvaultName: ""
+  tenantId: ""
+  secretProviderClassName: product-a-db-kv
+  syncedSecretName: product-a-db-secrets
+  databaseObjectName: product-a-api--database
+
+migrationJob:
+  # Off by default. Turning it on for a new environment goes verify first, a few syncs, then
+  # migrate: a Job that silently applies DDL on the very sync that enables it is not a change
+  # anyone should be able to make by accident.
+  enabled: false
+  # verify | migrate | seed  (anything else fails the render)
+  mode: verify
+  # Adds --plan: report what WOULD be applied, apply nothing. Meaningless with verify.
+  plan: false
+  # 0: a failed migration is investigated, never silently repeated.
+  backoffLimit: 0
+  # Under Argo there is no `helm --wait --timeout`; this is the ONLY bound on a stuck Job.
+  activeDeadlineSeconds: 900
+  # The "run it again" button: same digest + same nonce = same Job name = no-op. Bump it (commit it,
+  # in gitops) to get a fresh Job. The push-based dev pipeline passes its build id.
+  runNonce: "0"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+nodeSelector: {}
+tolerations: []

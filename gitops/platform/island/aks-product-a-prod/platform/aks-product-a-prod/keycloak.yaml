@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'keycloak' to 'aks-product-a-prod'.
+chartPath:     keycloak
+chartRevision: keycloak-1.1.1   # pinned git tag -- the pin that makes rollback possible
+releaseName:   keycloak
+namespace:     keycloak
+syncWave:      "4"

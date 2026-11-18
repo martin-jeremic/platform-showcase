@@ -1,0 +1,6 @@
+# Managed by CI (gitops-record-steps.yml). Do not edit by hand.
+# The validated dev candidate that the approval-gated Promote stages ship.
+# Same digest as apps/product-a-api/dev/image.yaml on purpose: this chart runs product-a-api's image.
+image:
+  digest: "sha256:b23dea40d972bf30e3d34a2a8138fceccfa781b393346ac699471a93b5b0f4d8"
+  version: "1.9.0-alpha.7"

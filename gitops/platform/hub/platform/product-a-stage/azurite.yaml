@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'azurite' to 'product-a-stage'.
+chartPath:     azurite
+chartRevision: azurite-0.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   azurite
+namespace:     infrastructure
+syncWave:      "3"

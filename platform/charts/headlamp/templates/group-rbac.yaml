@@ -1,0 +1,27 @@
+{{- /*
+OIDC groups -> built-in ClusterRoles. cluster-admin is refused (and so is any
+custom role): a browser session is not where the cluster's most dangerous binding
+belongs, and an unreviewed custom role name is how it sneaks back in.
+*/ -}}
+{{- if .Values.groupRbac.enabled }}
+{{- range .Values.groupRbac.bindings }}
+{{- if not (has .clusterRole (list "view" "edit" "admin")) }}
+{{- fail (printf "groupRbac.bindings[%s].clusterRole must be view, edit or admin (got %q); cluster-admin is not grantable through Headlamp" .group .clusterRole) }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-{{ .group }}
+  labels:
+    {{- include "headlamp.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .clusterRole }}
+subjects:
+  - kind: Group
+    name: {{ .group }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}

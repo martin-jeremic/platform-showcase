@@ -1,0 +1,9 @@
+# Optional overrides. Nothing here is a secret; the account key is never an input
+# or an output of this stack.
+# subscription_id      = "33333333-3333-3333-3333-333333333333"
+# location             = "westeurope"
+# foundry_account_name = "foundry-product-a"
+# deployment_name      = "llm-product-a"
+# model_name           = "gpt-5-mini"
+# deployment_capacity  = 10
+# local_auth_enabled   = false   # once every caller uses Entra tokens

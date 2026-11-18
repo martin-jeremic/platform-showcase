@@ -1,0 +1,30 @@
+apiVersion: v2
+name: observability-ingest
+description: >
+  Hub-side OTLP ingest gateway for distributed monitoring. Receives the OTLP
+  stream pushed by spoke clusters (cluster-monitoring-agent) over mutual TLS, and
+  fans out in-cluster to Prometheus (remote_write), Loki (push) and Tempo (OTLP).
+  The single ingress point for telemetry from other clusters; the storage backends
+  stay private. Built on Grafana Alloy, with its own cert-manager PKI.
+type: application
+version: 0.3.0
+appVersion: "1.0"
+keywords:
+  - otlp
+  - ingest
+  - grafana-alloy
+  - mtls
+  - multi-cluster
+# 0.3.0 -- alloy 1.10.0 -> 1.14.4, and pinned EXACTLY instead of ^1.0.0: a range
+#   let `helm dependency update` pick whatever was newest that day, so Chart.yaml
+#   did not say what was actually rendered.
+# 0.2.0 -- traces follow the spoke's `cluster` like logs do: with tenancy dynamic
+#   the gateway renders one filter + Tempo exporter per spokeClients entry
+#   (X-Scope-OrgID = the cluster). The single static trace tenant, which put every
+#   spoke's traces into one tenant, is gone. spokeClients[].duration: per-spoke
+#   client cert lifetime, for spokes that mount a copy of the bundle from Key Vault.
+dependencies:
+  - name: alloy
+    version: "1.14.4"
+    repository: https://grafana.github.io/helm-charts
+    condition: alloy.enabled

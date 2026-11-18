@@ -1,0 +1,26 @@
+# Rendered by the root app-of-apps. ONLY the resources listed here are Argo-managed.
+#
+# EVERYTHING NOT LISTED IS DELIBERATELY UNMANAGED, and that is load-bearing:
+#   root-application.yaml  applied once by hand. If Argo managed the object that
+#                          defines it, a bad sync could delete its own root.
+#   setup/                 one-time bootstrap: repository credentials, cluster
+#                          registration shapes, per-namespace CSI credentials. If
+#                          these were listed, a prune would delete the credential
+#                          Argo needs to read this repo -- and it could not
+#                          recover, because recovering requires reading the repo.
+# CI (azure-pipelines.yml) fails if anything from setup/ ever renders here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # AppProjects first (sync-wave -1 in each file).
+  - projects/platform-hub-dev.yaml
+  - projects/platform-aks-org-prod.yaml
+  - projects/platform-product-a-stage.yaml
+  - projects/platform-aks-product-a-demo.yaml
+  # The hub itself: adopts its own push-Helm platform in place, one descriptor
+  # batch at a time; with no descriptor present it generates nothing.
+  - appsets/platform-hub-dev.yaml
+  # Spokes.
+  - appsets/platform-aks-org-prod.yaml
+  - appsets/platform-product-a-stage.yaml
+  - appsets/platform-aks-product-a-demo.yaml

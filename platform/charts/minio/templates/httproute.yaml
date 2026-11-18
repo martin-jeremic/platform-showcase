@@ -1,0 +1,48 @@
+{{- if .Values.gateway.name -}}
+{{- if not .Values.minio.persistence.storageClass }}
+{{- fail "minio.persistence.storageClass is required: never fall through to the cluster default class" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}-route
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "platform-minio.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      sectionName: {{ required "gateway.sectionName is required" .Values.gateway.sectionName }}
+  hostnames:
+    - {{ required "route.hostname is required" .Values.route.hostname | quote }}
+  rules:
+    # Console first: its prefix starts with the API prefix, so the longer match
+    # must be listed (and win) before /minio.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.consolePath | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: {{ include "platform-minio.consoleServiceName" . }}
+          port: 9001
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.apiPath | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: {{ include "platform-minio.serviceName" . }}
+          port: 9000
+{{- end }}

@@ -1,0 +1,61 @@
+# Local dependencies for access-api: SQL Server, RabbitMQ and Keycloak.
+#
+#   echo 'MSSQL_SA_PASSWORD=<choose-one>' > .env      # untracked; compose reads it automatically
+#   docker compose -f docker-compose.dev.yml up -d --wait
+#
+# MSSQL_SA_PASSWORD has NO default on purpose (`:?` makes compose refuse to start without it).
+# SQL Server rejects weak passwords at start-up anyway, so any default would have to be a "strong"
+# literal in git, and a literal in git is exactly what the source compose file had: the same SA
+# password repeated in five connection strings. Every developer now picks their own.
+#
+# FIX compared with the source: a locally built Keycloak image (`pull_policy: never`) that nobody
+# else could build, a commented-out copy of every service with credentials inline, and no
+# healthchecks, so `up` returned before SQL Server accepted connections.
+
+name: access-dev
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+      MSSQL_PID: Developer
+    ports: ["1433:1433"]
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      # sqlcmd ships in the image (tools18); -C trusts the self-signed dev certificate.
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-access}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-dev-only-not-a-secret}
+    ports: ["5672:5672", "15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-dev-only-not-a-secret}
+      KC_HTTP_RELATIVE_PATH: /keycloak
+      KC_HEALTH_ENABLED: "true"
+    ports: ["8080:8080"]
+
+volumes:
+  sqlserver_data:

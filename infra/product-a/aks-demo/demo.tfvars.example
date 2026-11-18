@@ -1,0 +1,22 @@
+# Committed non-secret settings for the demo environment.
+# Copy to demo.tfvars (git-ignored) or pass with -var-file demo.tfvars.example.
+#
+# Pinned so a run never targets whatever subscription the CLI happens to default to.
+subscription_id        = "11111111-1111-1111-1111-111111111111"
+shared_subscription_id = "22222222-2222-2222-2222-222222222222"
+
+location   = "germanywestcentral"
+dblocation = "westeurope"
+
+# "A" = four node pools (system/worker/infra/monitoring), "B" = one E8ds_v5 node.
+shape = "A"
+
+# d-suffix SKUs + ephemeral OS disks; false falls back to s-suffix + managed disks.
+ephemeral_os = true
+
+pg_sku = "B_Standard_B1ms"
+
+# Operator IPs belong in an untracked *.auto.tfvars, never here. Example shape:
+# pg_admin_client_ips = { "operator-1" = "203.0.113.10" }
+
+enable_off_hours_shutdown = false

@@ -1,0 +1,88 @@
+# HTTP responses a service logged, from its own request log lines (Loki ruler,
+# LogQL).
+#
+# A RAW Loki rule-group file, shipped verbatim by templates/configmap.yaml
+# (.Files.Get, NOT tpl): the Prometheus template syntax in annotations passes
+# through to the ruler untouched.
+#
+# INPUT: the application log contract's `http_status`, structured metadata on the
+# request log line (Serilog RequestLoggingMiddleware in .NET, the http logger in
+# Python). Collector as in log-rules/exceptions.yaml. Unlike the Traefik metrics
+# behind observability rules/edge.yaml, this sees EVERY request a
+# service handles -- in-cluster calls too -- not only the ones that crossed the
+# edge. The two are complementary; neither replaces the other.
+#
+# GROUPING: per cluster / namespace / service_name -- see log-rules/exceptions.yaml.
+#
+# THRESHOLDS, from a 7-day baseline of the dev cluster (10m windows with >= 20
+# requests; only one API was that busy): 5xx ratio peaked at 16%, 4xx ratio at
+# 32% (p99 27%). Neither ratio rule below would have fired in that week. The >= 20
+# requests per 10m guard keeps one failed request on an idle service from
+# reading as 100%; those are still caught by PlatformServiceHttp5xx, the digest.
+groups:
+  # Digest: every 5xx is seen, nothing pages (see log-rules/exceptions.yaml for the
+  # notice route's behaviour and the 1h window).
+  - name: platform.logs.http.digest
+    interval: 5m
+    rules:
+      - alert: PlatformServiceHttp5xx
+        expr: |
+          sum by (cluster, namespace, service_name) (
+            count_over_time({service_name=~".+"} | http_status=~"5.." [1h])
+          ) > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "{{ $labels.service_name }} returned 5xx"
+          description: >-
+            {{ $labels.service_name }} in {{ $labels.namespace }} on
+            {{ $labels.cluster }} answered {{ $value }} requests with a 5xx in the
+            last hour.
+
+  # Escalation: a service failing a large share of its traffic, sustained.
+  - name: platform.logs.http
+    interval: 1m
+    rules:
+      - alert: PlatformServiceHttp5xxRateHigh
+        expr: |
+          (
+            sum by (cluster, namespace, service_name) (count_over_time({service_name=~".+"} | http_status=~"5.." [10m]))
+              /
+            sum by (cluster, namespace, service_name) (count_over_time({service_name=~".+"} | http_status!="" [10m]))
+          ) > 0.25
+          and
+          sum by (cluster, namespace, service_name) (count_over_time({service_name=~".+"} | http_status!="" [10m])) >= 20
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service_name }} 5xx ratio >25%"
+          description: >-
+            {{ $value | humanizePercentage }} of the requests
+            {{ $labels.service_name }} in {{ $labels.namespace }} on
+            {{ $labels.cluster }} handled in the last 10m returned 5xx, for 10m
+            and more. The service is failing.
+
+      - alert: PlatformServiceHttp4xxSurge
+        # 4xx are mostly the caller's doing (404, 401), so only a share far above
+        # the baseline counts: an expired signing key, a broken route or a client
+        # released against the wrong API turn most requests into 4xx at once.
+        expr: |
+          (
+            sum by (cluster, namespace, service_name) (count_over_time({service_name=~".+"} | http_status=~"4.." [10m]))
+              /
+            sum by (cluster, namespace, service_name) (count_over_time({service_name=~".+"} | http_status!="" [10m]))
+          ) > 0.5
+          and
+          sum by (cluster, namespace, service_name) (count_over_time({service_name=~".+"} | http_status!="" [10m])) >= 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_name }} 4xx ratio >50%"
+          description: >-
+            {{ $value | humanizePercentage }} of the requests
+            {{ $labels.service_name }} in {{ $labels.namespace }} on
+            {{ $labels.cluster }} handled in the last 10m were rejected with a
+            4xx, for 10m and more (normal is under 30%). Look for a broken route,
+            auth configuration or client release.

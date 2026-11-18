@@ -1,0 +1,139 @@
+# =============================================================================
+# elasticsearch -- BASE values
+# =============================================================================
+# Sync wave 3. Single-node Elasticsearch (version: Chart.yaml appVersion).
+#
+# THREE THINGS CHANGED IN THE FORK, all of them safety rather than cosmetics:
+#
+#   1. AUTHENTICATION IS ON, by default and by guard (templates/_helpers.tpl
+#      refuses security.enabled=false without an explicit allowInsecure).
+#
+#   2. NO HTTPROUTE. The template was removed, not merely disabled, so it cannot
+#      be switched on by a values typo. Nothing in the platform needs Elasticsearch
+#      from outside the cluster; a real external need gets a deliberate design
+#      (auth at the edge, a real SAN) rather than a flag.
+#
+#   3. NO HOSTPATH PV. The original defaulted persistence.hostPath to a local
+#      directory, which on AKS renders a node-pinned hostPath PersistentVolume that
+#      loses its data when that node is replaced. Storage is always dynamic, and
+#      tools/check-platform.sh fails any chart that renders a PersistentVolume.
+#
+# SINGLE REPLICA, DELIBERATELY. discovery.type=single-node -- a second replica
+# would be a second unrelated instance behind one Service.
+
+image:
+  repository: docker.elastic.co/elasticsearch/elasticsearch
+  # Empty = Chart.appVersion, the only place the version is set.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The two init containers (data-dir chown, vm.max_map_count). They pulled a bare
+# `busybox` until 1.1.0 -- whatever `latest` meant on the day a node pulled it.
+initImage:
+  repository: docker.io/library/busybox
+  tag: "1.38.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+clusterName: elasticsearch
+
+service:
+  type: ClusterIP
+  httpPort: 9200
+  transportPort: 9300
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+security:
+  enabled: true
+  # Must be set together with enabled: false. Local throwaway clusters only.
+  allowInsecure: false
+
+# Only when azureKeyVault.enabled is false: a pre-created Secret holding the
+# `elastic` bootstrap password. Never a password in values.
+auth:
+  existingSecret: ""
+  existingSecretKey: elastic-password
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "2Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# Java heap at ~half the memory limit. Elasticsearch wants heap well below the
+# container limit, because Lucene uses the remainder for the page cache -- setting
+# -Xmx to the limit starves it and makes search slower, not faster.
+esJavaOpts: "-Xms2g -Xmx2g"
+
+persistence:
+  # platform-retain (reclaimPolicy: Retain), owned by the wave-0 chart. Required --
+  # never empty.
+  storageClass: platform-retain
+  size: 32Gi
+
+env: {}
+
+nodeSelector:
+  pool: infra
+tolerations:
+  - key: workload
+    operator: Equal
+    value: infra
+    effect: NoSchedule
+affinity: {}
+
+priorityClassName: system-cluster-critical
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Restart the pod when the CSI-synced Secret changes, so a rotated vault password
+# is picked up. NOTE: Elasticsearch applies ELASTIC_PASSWORD only on FIRST start;
+# afterwards a rotation must also go through the _security/user/elastic/_password
+# API, or the probes start failing with the new value.
+reloader:
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# NetworkPolicy
+# ---------------------------------------------------------------------------
+# OFF until the cluster's CNI and policy engine are confirmed -- an unenforced
+# NetworkPolicy is worse than none, because it reads as protection that is not
+# there. With authentication on, this is defence in depth, not the only control.
+networkPolicy:
+  enabled: false
+  allowedPodSelector:
+    matchLabels:
+      elasticsearch-client: "true"
+  allowedNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: product-a
+
+# ============================================================================
+# Azure Key Vault + Secrets Store CSI Driver integration
+# ============================================================================
+azureKeyVault:
+  enabled: true
+  # workloadIdentity (default) | vmManagedIdentity | servicePrincipal -- see the
+  # rabbitmq chart's values for what each costs.
+  authMode: workloadIdentity
+  kubeletClientId: ""
+  credentialsSecretName: ""
+  workloadIdentityClientId: ""
+  tenantId: ""
+  keyvaultName: ""
+  secretPrefix: "elasticsearch"
+  syncedSecretName: "elasticsearch-kv-sync"
+  secretProviderClassName: "elasticsearch-secret-provider"
+  # The driver fails the ENTIRE mount if any referenced object is missing.
+  secrets:
+    - kvName: password
+      key: elasticsearchPassword
+      env: ELASTIC_PASSWORD

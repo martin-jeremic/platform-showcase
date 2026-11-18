@@ -1,0 +1,844 @@
+# =============================================================================
+# observability -- chart mechanism and cluster-agnostic defaults
+#
+# This file names NO environment. Every environment fact -- cluster identity,
+# hostnames, storage classes and sizes, tenants, credential sources, which optional
+# components run, where alerts go -- lives in that cluster's gitops values:
+#   gitops/platform: platform/values/<cluster>/observability.yaml
+# Those facts default to empty here, and the render fails on an empty one rather
+# than inheriting another environment's value (templates/assertions.yaml).
+#
+#   helm dependency build observability
+#   helm template observability observability -n observability \
+#     -f observability/values.yaml -f <gitops>/platform/values/<cluster>/observability.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Optional-component gates (see Chart.yaml). They drive the `condition:` on the
+# alloy and tempo dependencies, in their own map because the alias blocks below
+# are the SUBCHART value blocks.
+# -----------------------------------------------------------------------------
+components:
+  # The log collector. On everywhere. Turning it off means the cluster ships no
+  # logs while still reporting Healthy.
+  alloy: true
+  # Traces; per environment (only clusters whose apps emit OTLP).
+  tempo: false
+
+# -----------------------------------------------------------------------------
+# Cluster identity
+#
+# ONE value per cluster: kubePromStack.prometheus.prometheusSpec.externalLabels
+# .cluster (empty here; templates/assertions.yaml requires it). Everything else
+# derives from it:
+#   - every target THIS Prometheus scrapes gets `cluster` from the default scrape
+#     class (prometheusSpec.scrapeClasses), which reads externalLabels.cluster;
+#   - every alert carries it, because Prometheus attaches external labels to the
+#     alerts it sends to Alertmanager;
+#   - alloyPipeline.cluster must equal it -- assertions.yaml fails the render when
+#     they differ, so logs and metrics cannot name a cluster twice.
+#
+# Spoke data arrives through observability-ingest already stamped by the spoke's
+# agent (remote_write keeps its labels; scrape classes never touch it). So on the
+# hub, `cluster` is the ONLY thing separating the hub's own series from every
+# spoke's -- which is why rules/*.yaml aggregate `by (cluster, ...)`.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Priority (production floor), two tiers. Each subchart reads its own key -- there
+# is no shared global -- so it is set per component below:
+#   system-node-critical     per-node DaemonSets (alloy, prometheus-node-exporter):
+#                            on a full node they displace a platform pod, which can
+#                            reschedule elsewhere -- they cannot.
+#   system-cluster-critical  every other long-running workload here.
+# Until this existed every pod here ran at priority 0, and a log-collector pod sat
+# Pending on a full infra node: a DaemonSet pod is bound to its node, and at
+# priority 0 the scheduler had no victim it was allowed to preempt. Helm hook Jobs
+# (admission webhook certgen) keep the default: run-once batch work should not
+# preempt anything.
+# -----------------------------------------------------------------------------
+
+kubePromStack:
+  nameOverride: kube-prometheus-stack
+  # Pinned names: grafana-sso-gateway's HTTPRoutes, the Loki ruler's
+  # alertmanager_url and observability-ingest's remote_write URL all name these
+  # Services. assertions.yaml checks the ruler URL against it.
+  fullnameOverride: kube-prom-stack-kube-prome
+
+  # Per-alert overrides of the defaultRules (`for` and `severity` by alert name).
+  # KubeNodeNotReady ships as warning. Most clusters in this fleet run one or two
+  # nodes, so a NotReady node is an outage: raised to critical.
+  customRules:
+    KubeNodeNotReady:
+      severity: critical
+
+  # kubeControllerManager / kubeScheduler / kubeEtcd / kubeProxy: per environment.
+  # Self-managed clusters give their node endpoints; managed control planes (AKS)
+  # set enabled: false -- the control plane runs in the provider's subscription and
+  # exposes no scrapeable endpoint, so the monitors fire TargetDown forever, and
+  # permanently-red alerts teach people to ignore the alert channel.
+
+  prometheusOperator:
+    priorityClassName: system-cluster-critical
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # NO per-monitor `cluster` relabelings. The default scrape class under
+  # prometheusSpec stamps every target instead. Two reasons:
+  #   1. Helm replaces lists wholesale, so a kubelet relabelings override REPLACED
+  #      the chart-default relabeling that stamps `metrics_path` ("metrics_path is
+  #      required to match upstream rules and charts"). The kubernetes-mixin
+  #      dashboards' hidden `cluster` variable, the k8s.rules recording rules and
+  #      CPUThrottlingHigh all filter on metrics_path="/metrics/cadvisor", so they
+  #      returned nothing -- and KubeletDown fired forever -- with no error
+  #      anywhere. Not overriding the kubelet lists at all is the fix.
+  #   2. Per-monitor stamps only cover the monitors someone remembered to list.
+  #      Every component ServiceMonitor (traefik, cert-manager, argocd, rabbitmq,
+  #      loki, alloy) arrived without one.
+  # A cluster that DOES need kubelet relabelings must restate the metrics_path item
+  # first -- see the anchor in the hub's gitops values.
+
+  kube-state-metrics:
+    priorityClassName: system-cluster-critical
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  prometheus-node-exporter:
+    # Per-node DaemonSet: the node tier.
+    priorityClassName: system-node-critical
+    resources:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+  prometheus:
+    # Opt the operator-generated StatefulSet OUT of Stakater Reloader (which runs
+    # autoReloadAll). The operator's config-reloader sidecar already hot-reloads
+    # rule changes without a restart. Reloader rolling prometheus-0 on every
+    # rulefiles change is redundant and harmful: the pod's Azure disk detaches
+    # slowly, prometheus-0 sits Pending past Argo's health wait, and every
+    # rules-only release lands as a red "Sync failed" that self-heals a minute
+    # later. CR annotations propagate to the generated StatefulSet.
+    annotations:
+      reloader.stakater.com/auto: "false"
+    prometheusSpec:
+      priorityClassName: system-cluster-critical
+      # THE cluster identity. Per cluster.
+      externalLabels:
+        cluster: ""
+
+      # Default scrape class: applies to every ServiceMonitor, PodMonitor, Probe
+      # and ScrapeConfig that does not name a class of its own. Its relabelings run
+      # BEFORE each monitor's own.
+      #
+      # kube-prometheus-stack renders scrapeClasses through `tpl` in its own
+      # context, so `replacement` is DERIVED from externalLabels.cluster -- cluster
+      # values set the identity once and never restate this list.
+      #
+      # Written WITHOUT spaces on purpose: the subchart toYaml's this list before
+      # tpl, and toYaml folds long strings at a space -- which would split the
+      # action across lines and fail the parse.
+      scrapeClasses:
+        - name: cluster-identity
+          default: true
+          relabelings:
+            - targetLabel: cluster
+              replacement: '{{.Values.prometheus.prometheusSpec.externalLabels.cluster}}'
+
+      # Select ALL ServiceMonitors / PodMonitors / PrometheusRules regardless of
+      # release labels, so component charts need no release label.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      probeSelectorNilUsesHelmValues: false
+
+      # Accept remote_write from observability-ingest (the hub) and from Tempo's
+      # metrics generator. Off by default upstream; without it spoke metrics are
+      # silently rejected.
+      enableRemoteWriteReceiver: true
+
+      # 10 days of metrics on every cluster. Storage size: per environment.
+      retention: 10d
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+
+  alertmanager:
+    # Same Reloader opt-out as prometheus: the operator's sidecar hot-reloads the
+    # config Secret, so a Reloader bounce only adds a transient red sync.
+    annotations:
+      reloader.stakater.com/auto: "false"
+    alertmanagerSpec:
+      retention: 120h
+      priorityClassName: system-cluster-critical
+      resources:
+        requests:
+          cpu: 20m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+      # ---- Image: >= 0.34.0 is REQUIRED, not a preference ---------------------
+      # Mail leaves as a webhook_config POST to Microsoft Graph /sendMail (there is
+      # no SMTP relay; email_configs is SMTP-only and there is no Graph transport).
+      # That depends on webhook `payload` templating (0.32.0). The chart default of
+      # the time, v0.32.2, re-parsed every RENDERED payload string as YAML: a
+      # description containing a colon ("Pod loki-0: restarting") became a nested
+      # object, and Graph answered 400. 0.34.0 stopped the SECOND pass only; 0.34.1
+      # still YAML-decodes each rendered payload string once and sends the decoded
+      # value when it is not a string, so a payload string must never be valid YAML
+      # for a list, map, number or bool -- see platform.subject in
+      # alertmanager/notifications.tmpl. The operator validates the config against
+      # its vendored Alertmanager library, which models payload / url_file / oauth2
+      # since 0.32.1. Confirm the running binary after deploy -- a silently ignored
+      # pin looks like a working one until an alert contains a colon:
+      #   kubectl -n observability exec alertmanager-kube-prom-stack-kube-prome-alertmanager-0 \
+      #     -c alertmanager -- alertmanager --version
+      image:
+        tag: v0.34.2
+
+      # ---- The config Secret is rendered by THIS chart ------------------------
+      # templates/alertmanager-config.yaml builds it from `notifications:` below.
+      # kube-prometheus-stack therefore renders NO config Secret of its own and
+      # IGNORES alertmanager.config / alertmanager.templateFiles -- the template
+      # fails the render if templateFiles is set, so nobody edits dead config.
+      useExistingSecret: true
+      configSecret: alertmanager-platform-config
+
+      # The receiver credentials' CSI volume and mount are per cluster (a values
+      # file cannot add a list entry only when a flag is on); see `notifications`.
+
+  grafana:
+    fullnameOverride: kube-prom-stack-grafana
+    priorityClassName: system-cluster-critical
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+    # Argo CD never runs Helm tests; the test Pod/ConfigMap/SA would only be extra
+    # objects in the Application.
+    testFramework:
+      enabled: false
+
+    # The local admin credential (break-glass) comes from a hand-seeded Secret
+    # (gitops setup/). Without admin.existingSecret the subchart RENDERS an admin
+    # Secret with a randAlphaNum password: a fresh value on every render, so every
+    # Argo sync rotates the admin password, and CI's no-literal-password gate
+    # cannot tell that generated value from a committed one. Keys stay at the
+    # subchart defaults (admin-user / admin-password).
+    admin:
+      existingSecret: grafana-admin
+
+    # REQUIRED for multi-tenancy: Grafana's SQLite DB holds the per-scope ORGS and
+    # their datasources, created via the API. Without a PVC that path is an
+    # emptyDir, so a rollout-restart once erased every API-created Org.
+    # File-provisioned objects survive a wipe; API-created Orgs do not.
+    # storageClassName and size: per environment (assertions.yaml requires a class).
+    persistence:
+      enabled: true
+      type: pvc
+      accessModes:
+        - ReadWriteOnce
+
+    sidecar:
+      datasources:
+        # Both sidecars are k8s-sidecar containers in the same pod and both default
+        # their health check to 8080. Without this they clash and one crash-loops.
+        healthCheckPort: 8081
+      dashboards:
+        # Folders. BOTH are required and neither works alone: the annotation is
+        # read only when foldersFromFilesStructure is on. With neither, every
+        # dashboard landed flat in "General" although each ConfigMap carried a
+        # grafana_folder annotation.
+        folderAnnotation: grafana_folder
+        provider:
+          foldersFromFilesStructure: true
+        # Pinned to "1": an empty labelValue matches ANY value, so any ConfigMap
+        # that merely carries the key gets loaded. Dashboards are opted in.
+        label: grafana_dashboard
+        labelValue: "1"
+        # EXPLICIT. kube-prometheus-stack sets searchNamespace: ALL, so leaving the
+        # key unset lets ANY namespace inject dashboards into this Grafana. It must
+        # name the release namespace: templates/dashboards.yaml and the gitops
+        # dashboards Application both put their ConfigMaps there, and
+        # assertions.yaml checks the two agree.
+        searchNamespace: observability
+
+    # ---- Keycloak OIDC: config secret + credential secret -------------------
+    # Two Secrets feed Grafana, wired through DIFFERENT mechanisms on purpose:
+    #
+    #   grafana-sso-oidc  rendered by the grafana-sso-gateway chart -- the
+    #                     non-secret GF_AUTH_GENERIC_OAUTH_* configuration. Every
+    #                     key IS an env var name, so envFromSecrets (-> envFrom).
+    #   grafana-oidc      hand-seeded from gitops setup/ -- ONLY the client secret,
+    #                     because the Grafana pod mounts no SecretProviderClass
+    #                     volume. Its key is `client-secret`, which is NOT an env var
+    #                     name, so it goes through envValueFrom (-> valueFrom.
+    #                     secretKeyRef), which maps key -> named env var.
+    #
+    # Loading BOTH via envFromSecrets injected a useless `client-secret` env var
+    # and no GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET at all, so Grafana sent an empty
+    # client secret and Keycloak refused the code exchange with
+    # invalid_client_credentials. It does not fail at deploy time: Grafana starts,
+    # reports healthy, and fails the moment a user clicks "Sign in with Keycloak".
+    envFromSecrets:
+      - name: grafana-sso-oidc
+        optional: false
+    envValueFrom:
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+        secretKeyRef:
+          name: grafana-oidc
+          key: client-secret
+
+    # server.domain and server.root_url: per environment. root_url is required:
+    # the alert links are built from it (observability.grafanaRootUrl).
+    grafana.ini:
+      server:
+        serve_from_sub_path: true
+
+    # additionalDataSources: per environment. The Loki / Tempo datasources carry
+    # that environment's tenant list in X-Scope-OrgID (tenancy is on), and the
+    # Alertmanager Logs link reads the Loki uid from them.
+    #
+    # NO Alertmanager datasource there: the subchart already provisions it
+    # (grafana.sidecar.datasources.alertmanager, name "Alertmanager"). Adding it
+    # again emits a SECOND entry with the same name and uid. The Silence link reads
+    # the name from the subchart's setting (observability.alertmanagerDatasourceName).
+
+# -----------------------------------------------------------------------------
+# Loki  (alias: loki)
+#
+# fullnameOverride: loki -> Service "loki", matching the Grafana datasource URL,
+# the Alloy push URL and observability-ingest's push URL.
+# Deployment mode: Monolithic -- one pod.
+# Storage: filesystem by default; clusters with an Azure storage account switch to
+#          blob through workload identity in their gitops values (chunks off the
+#          node, retention as a lifecycle rule, a full disk no longer wedges
+#          ingestion).
+# -----------------------------------------------------------------------------
+loki:
+  fullnameOverride: loki
+
+  # Loki's own /metrics, scraped. Off upstream, so every Prometheus panel on a
+  # Loki dashboard was empty. Gated on the ServiceMonitor CRD.
+  monitoring:
+    serviceMonitor:
+      enabled: true
+
+  # Log alert rules. The rules sidecar (k8s-sidecar, a container in the Monolithic
+  # pod) copies every ConfigMap in this namespace that carries `label` into
+  # `folder`. Chart observability-log-rules writes one ConfigMap per Loki tenant,
+  # and the ruler finds <folder>/<tenant>/*.yaml. label and folder restate the
+  # subchart defaults on purpose: they are the contract that chart writes to, and
+  # the ruler's storage directory below must equal `folder` (assertions.yaml).
+  #
+  # The per-tenant subfolder comes from the annotation
+  # k8s-sidecar-target-directory: <tenant> on each ConfigMap -- k8s-sidecar's
+  # BUILT-IN default (FOLDER_ANNOTATION unset -> that name; a relative value is
+  # joined onto FOLDER). sidecar.rules.folderAnnotation is therefore NOT set.
+  sidecar:
+    rules:
+      label: loki_rule
+      folder: /rules
+
+  deploymentMode: Monolithic
+
+  loki:
+    # Tenancy ON. Every read/write requires an X-Scope-OrgID tenant header
+    # (writers: this cluster's Alloy -> alloyPipeline.tenant; on the hub, spoke
+    # logs -> the spoke's cluster via observability-ingest). Tenant-less requests
+    # get 401 "no org id".
+    auth_enabled: true
+    # The Main Org datasource queries several tenants in one request via a
+    # pipe-joined header. NOTE: multi-tenant requests 400 on /tail and /push, so it
+    # does range queries but not live tailing; single-tenant Orgs tail fine.
+    querier:
+      multi_tenant_queries_enabled: true
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          # Must match storage.type. `filesystem` here while the storage block says
+          # azure is a silent split-brain: Loki writes chunks to blob and looks for
+          # the index on disk. assertions.yaml checks the two agree.
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    compactor:
+      retention_enabled: true
+      delete_request_store: filesystem
+
+    limits_config:
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      retention_period: 2160h   # 90 days
+
+    # The ruler. It was running but inert: it read /var/loki/rules/<tenant>/
+    # while the rules sidecar wrote to /rules -- two paths that never met -- and it
+    # had no Alertmanager.
+    #   - storage.local.directory IS the sidecar's folder: an emptyDir rebuilt from
+    #     the ConfigMaps on every start, so a deleted ConfigMap leaves no stale
+    #     rules behind.
+    #   - alertmanager_url is this release's own Alertmanager. The namespace is a
+    #     template (the Loki chart passes its config through tpl); the service
+    #     name is <kubePromStack.fullnameOverride>-alertmanager, which the subchart
+    #     cannot read -- assertions.yaml checks it instead.
+    rulerConfig:
+      storage:
+        type: local
+        local:
+          directory: /rules
+      alertmanager_url: "http://kube-prom-stack-kube-prome-alertmanager.{{ .Release.Namespace }}.svc:9093"
+
+  singleBinary:
+    replicas: 1
+    priorityClassName: system-cluster-critical
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+    # storageClass and size: per environment.
+    persistence:
+      enabled: true
+
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+  gateway:
+    enabled: false
+  test:
+    enabled: false
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+  # With both cache tiers off the shared memcached block would still render an
+  # unused ServiceAccount.
+  memcached:
+    enabled: false
+  lokiCanary:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Alloy pipeline inputs (consumed by templates/_helpers.tpl, not by a subchart)
+# -----------------------------------------------------------------------------
+alloyPipeline:
+  # The `cluster` external label on every log stream. MUST equal
+  # kubePromStack.prometheus.prometheusSpec.externalLabels.cluster.
+  cluster: ""
+  # X-Scope-OrgID on push. Loki runs with auth_enabled, so a push with no tenant is
+  # rejected with 401 "no org id". By convention tenant == cluster, so the log
+  # alerts' `cluster` label -- which Alertmanager routes audiences by -- is the
+  # tenant too.
+  tenant: ""
+  lokiPushUrl: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+  logLevel: info
+  # Parse the application log contract: JSON lines get `level` as a stream label
+  # and http_status, exception_type, trace_id, ... as structured metadata -- the
+  # same schema observability-ingest gives the spokes' logs on the hub, so one set
+  # of LogQL rules (observability-log-rules) works on every tenant. On for
+  # clusters that run product services; off where JSON lines follow other shapes
+  # and would gain nothing but CPU. tools/compare-log-contract.py fails when the
+  # two parsers' field sets differ.
+  parseLogContract: false
+
+# -----------------------------------------------------------------------------
+# Grafana Alloy (alias: alloy) -- the log collector on every cluster.
+# -----------------------------------------------------------------------------
+alloy:
+  # The podlogs CRD ships as a sub-subchart gated on crds.create. This pipeline
+  # uses loki.source.file and never loki.source.podlogs, so the CRD buys nothing --
+  # and a cluster-scoped, Helm-owned CRD we do not use only creates a future
+  # ownership fight with anything else that wants it.
+  crds:
+    create: false
+
+  # Alloy's own /metrics: loki_write_sent_entries_total, _dropped_entries_total and
+  # _request_duration_seconds_count{status_code}. Without them a collector that is
+  # Running but 401ing against Loki is invisible -- the DaemonSet is healthy, the
+  # logs just stop.
+  serviceMonitor:
+    enabled: true
+
+  controller:
+    type: daemonset
+    # A node's logs can only be read on that node, so the collector must run on
+    # EVERY node and tolerates every taint -- a property of the component, not of
+    # a cluster.
+    tolerations:
+      - operator: Exists
+    priorityClassName: system-node-critical
+    volumes:
+      extra:
+        # Positions + component state. A hostPath, not the default emptyDir, so a
+        # pod restart resumes tailing instead of re-ingesting every log file on
+        # the node from byte 0. (A hostPath VOLUME is fine; what the platform
+        # forbids is a hostPath PersistentVolume pinned to one node.)
+        - name: alloy-data
+          hostPath:
+            path: /var/lib/alloy
+            type: DirectoryOrCreate
+
+  alloy:
+    # Pipeline comes from templates/alloy-config.yaml. `name` is deliberately left
+    # unset: the subchart then defaults to its own fullname, which is exactly what
+    # our ConfigMap is named (observability.alloyFullname).
+    configMap:
+      create: false
+      key: config.alloy
+    mounts:
+      varlog: true
+      extra:
+        - name: alloy-data
+          mountPath: /var/lib/alloy
+    # Must match the mountPath above; Alloy passes it as --storage.path.
+    storagePath: /var/lib/alloy
+    enableReporting: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  configReloader:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 50Mi
+      limits:
+        cpu: 100m
+        memory: 100Mi
+
+# -----------------------------------------------------------------------------
+# Tempo (alias: tempo) -- fullnameOverride: tempo -> Service "tempo".
+# -----------------------------------------------------------------------------
+tempo:
+  fullnameOverride: tempo
+  replicas: 1
+  # Top level, not under tempo.tempo (the subchart's pod template reads it here).
+  priorityClassName: system-cluster-critical
+
+  tempo:
+    # The Tempo container's resources live under tempo.tempo (the top-level key is
+    # read by nothing in this chart version).
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    reportingEnabled: false
+    # Traces tenancy ON. Writers: observability-ingest stamps the spoke's cluster
+    # (one filter + exporter per spoke). Flipped while Tempo was EMPTY (no app was
+    # instrumented yet), so the cutover was risk-free.
+    multitenancyEnabled: true
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+    # RED metrics from traces, written to the in-cluster Prometheus.
+    metricsGenerator:
+      enabled: true
+      remoteWriteUrl: "http://kube-prom-stack-kube-prome-prometheus.observability.svc.cluster.local:9090/api/v1/write"
+
+  # storageClassName and size: per environment.
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteOnce
+
+# -----------------------------------------------------------------------------
+# dashboards -- every dashboards/<Folder>/<name>.json becomes one ConfigMap
+#
+# The DIRECTORY name is the Grafana folder (grafana_folder annotation), the file
+# name the ConfigMap suffix. The discovery label and the folder annotation key are
+# read from kubePromStack.grafana.sidecar.dashboards, so they cannot drift.
+#
+# Every folder needs a key here, and every key needs a folder: the template fails
+# the render on either mismatch. Only dashboards that belong to the chart ship
+# here; per-cluster dashboards live in the gitops repo (island: a kustomize
+# Application with one configMapGenerator per folder).
+# -----------------------------------------------------------------------------
+dashboards:
+  folders:
+    Platform: true     # cluster-overview
+    Product: false     # clusters whose Loki holds product-a tenants: ingest-rate (Loki only)
+
+# -----------------------------------------------------------------------------
+# prometheusRules -- alerts as code, ONE GATE PER FILE.
+#
+# Every rules/*.yaml is a RAW Prometheus rule-group file, wrapped into one
+# PrometheusRule per file and loaded with .Files.Get (NOT tpl) -- Prometheus'
+# {{ $labels.x }} passes through. Raw files so promtool lints them directly.
+#
+# A component file must be OFF wherever the component is not scraped: its rules
+# detect "endpoints vanished with the pod", which against a component that was
+# never installed would fire forever. Component files default to FALSE; each
+# cluster opts in to exactly what it scrapes. Every file must have a key and every
+# key a file (the template fails on either mismatch). Flip a gate only AFTER the
+# job label was read from live Prometheus -- a wrong job= never fires and never
+# errors:
+#   curl -s 'http://localhost:9090/api/v1/label/job/values'
+# -----------------------------------------------------------------------------
+prometheusRules:
+  enabled: true
+  files:
+    workload: true       # cluster-generic: kube-state-metrics + cAdvisor
+    scaling: true        # cluster-generic: kube-state-metrics
+    certificates: false  # cert-manager ServiceMonitor
+    edge: false          # job traefik-gateway-metrics
+    rabbitmq: false      # job rabbitmq (pinned by the rabbitmq chart)
+    keycloak: false      # job keycloak
+    postgres: false      # job postgres-exporter -- see the file header before enabling
+    argocd: false        # job argocd-application-controller-metrics (where Argo runs)
+    spokes: false        # hub only: every cluster's series are there
+    controlplane: false  # hub only: its self-managed control plane and SSD
+    trivy: false         # job trivy: new fixable Critical CVEs, baked-in secrets, scanner silent
+
+# -----------------------------------------------------------------------------
+# notifications -- where alerts go
+#
+# templates/alertmanager-config.yaml renders the Alertmanager config Secret from
+# this block, with toYaml and NO tpl, exactly as the subchart would, so
+# Alertmanager's {{ }} below passes through untouched.
+#
+#   enabled: false -> everything routes to "null" (Watchdog included). Receivers
+#                     are not rendered, so no credential file is referenced.
+#   enabled: true  -> the route tree below, plus render-time guards: tenantId,
+#                     every graph.* fact and every keyVault.* fact set (no
+#                     REPLACE_WITH_), the Key Vault mount present in
+#                     alertmanagerSpec.volumes/volumeMounts, the identity wiring
+#                     for the chosen authMode, and grafana.ini root_url set.
+#
+# Per cluster, in the gitops values: enabled, tenantId, graph.*, keyVault.*, and
+# the CSI volume + mount (kube-prometheus-stack values, so they cannot be emitted
+# from here):
+#
+#   kubePromStack:
+#     alertmanager:
+#       serviceAccount:                    # workloadIdentity only
+#         annotations:
+#           azure.workload.identity/client-id: "<identity CLIENT id>"
+#       alertmanagerSpec:
+#         podMetadata:
+#           labels:
+#             azure.workload.identity/use: "true"
+#         volumes:
+#           - name: alertmanager-kv
+#             csi:
+#               driver: secrets-store.csi.k8s.io
+#               readOnly: true
+#               volumeAttributes:
+#                 secretProviderClass: alertmanager-kv
+#               # servicePrincipal ONLY -- and then it is required:
+#               # nodePublishSecretRef: {name: secrets-store-creds}
+#         volumeMounts:
+#           - name: alertmanager-kv
+#             mountPath: /etc/alertmanager/kv
+#             readOnly: true
+#
+# The vault objects (<objectPrefix>--teams-webhook-url, <objectPrefix>--graph-
+# client-secret, and one Teams URL per audience) must exist BEFORE that change
+# syncs: the Azure provider fails the whole mount if one is missing, and
+# alertmanager-0 sits in ContainerCreating. All of them are written, together, by
+# the alerting stack in infra/ (Entra app, rotating client secret, the
+# Teams Logic App); nobody seeds them by hand.
+#
+# ROTATION is a vault write and nothing else. The CSI driver rewrites the mounted
+# file every rotationPollInterval and Alertmanager reads *_file at use. No Secret to
+# re-apply, no pod to delete.
+#
+# TEAMS ONLY AFTER MAIL. warning and notice route to mail only. A cluster whose
+# Teams post works but whose Exchange role assignment has not landed drops every
+# warning silently and looks healthy. Do not enable a cluster before both work.
+# -----------------------------------------------------------------------------
+notifications:
+  enabled: false
+
+  # Entra tenant -- the Graph token endpoint and the Key Vault both live in it.
+  tenantId: ""
+
+  # Microsoft Graph /sendMail. Mail.Send is granted in Exchange Online (RBAC for
+  # Applications), scoped to `sender`. The app holds NO Graph permission in Entra,
+  # deliberately: Entra grants add to Exchange RBAC, so an admin consent for
+  # Mail.Send would let it send as ANY mailbox in the tenant whatever the scope
+  # says, and nothing in the cluster could see it.
+  graph:
+    clientId: ""        # app registration CLIENT id (not a secret)
+    sender: ""          # mailbox alerts are sent FROM
+    recipients: []      # who receives the mail
+
+  # Further audiences on THIS Alertmanager, by cluster. Only a hub needs them: its
+  # Prometheus evaluates alerts for clusters that have no Alertmanager of their own
+  # (the agent spokes), and those clusters may belong to other people than the
+  # hub's own alerts do. An alert whose `cluster` label is in an audience's
+  # `clusters` goes to THAT audience's sender, recipients and Teams channel --
+  # through the SAME route tree, copied once per audience. The Graph app, client
+  # secret, tenant and vault are shared.
+  #
+  # The render fails on: a name or cluster outside ^[a-z0-9-]+$, an empty clusters,
+  # sender or recipients, a cluster claimed by two audiences, or an audience
+  # claiming this Alertmanager's own cluster.
+  audiences: {}
+
+  keyVault:
+    keyvaultName: ""
+    # workloadIdentity (default): the Alertmanager ServiceAccount, federated.
+    # vmManagedIdentity: the kubelet identity (vault-wide on that node).
+    # servicePrincipal: on-prem, the per-namespace secrets-store-creds Secret named
+    #   in the volume's nodePublishSecretRef.
+    authMode: workloadIdentity
+    kubeletClientId: ""   # vmManagedIdentity only: the kubelet identity CLIENT id
+    # Vault objects are <objectPrefix>--teams-webhook-url,
+    # <objectPrefix>--graph-client-secret and, per audience,
+    # <objectPrefix>--<audience>-teams-webhook-url.
+    objectPrefix: alertmanager
+
+  # Alertmanager template invocations the receivers use. Values are never templated
+  # by Helm, so these reach Alertmanager verbatim. The defines live in
+  # alertmanager/notifications.tmpl.
+  text:
+    teamsTitle: '{{ template "platform.teams.title" . }}'
+    teamsText: '{{ template "platform.teams.text" . }}'
+    emailSubject: '{{ template "platform.email.subject" . }}'
+    emailHtml: '{{ template "platform.email.html" . }}'
+
+  # The Alertmanager config itself. Alertmanager-native except for two receiver
+  # shorthands, expanded by the template so the Teams file path and the whole Graph
+  # block are written ONCE instead of once per receiver:
+  #   teams: {}       -> msteamsv2_configs: [{webhook_url_file, send_resolved: true,
+  #                      title, text}]
+  #   graphMail: {}   -> webhook_configs: [<the Graph /sendMail block>]
+  # Each top-level key given under a shorthand REPLACES the generated one (e.g.
+  # send_resolved: false below).
+  #
+  # msteamsv2_config has exactly six fields -- send_resolved, webhook_url XOR
+  # webhook_url_file, title, text, http_config. There is NO `summary` (that is the
+  # deprecated v1 msteams_config), and the operator's strict unmarshal rejects an
+  # unknown field while config_out keeps the LAST GOOD config: a rejected change
+  # looks like a healthy cluster alerting from the old config.
+  config:
+    global:
+      resolve_timeout: 5m
+    # kube-prometheus-stack's four defaults, restated because its config rendering
+    # is off. Load-bearing: the InfoInhibitor pair is why rules/scaling.yaml uses
+    # severity "notice" and not "info".
+    inhibit_rules:
+      - source_matchers:
+          - 'severity = critical'
+        target_matchers:
+          - 'severity =~ warning|info'
+        equal:
+          - 'namespace'
+          - 'alertname'
+      - source_matchers:
+          - 'severity = warning'
+        target_matchers:
+          - 'severity = info'
+        equal:
+          - 'namespace'
+          - 'alertname'
+      - source_matchers:
+          - 'alertname = InfoInhibitor'
+        target_matchers:
+          - 'severity = info'
+        equal:
+          - 'namespace'
+      - target_matchers:
+          - 'alertname = InfoInhibitor'
+    route:
+      # Catch-all: warning, info and unlabelled alerts still reach a human.
+      receiver: platform-email
+      # `cluster` first: a hub serves several clusters, and Alertmanager must never
+      # group two clusters' alerts into one message.
+      group_by: ['cluster', 'namespace', 'alertname']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+        # Watchdog proves the pipeline works. Routing it to people trains them to
+        # ignore Alertmanager.
+        - receiver: "null"
+          matchers:
+            - alertname = "Watchdog"
+        # Security findings (rules/trivy.yaml): Teams AND mail, once a day -- a
+        # standing finding is not news every 4h. Before the critical route, so it
+        # wins whatever the severity; first match ends the walk.
+        - receiver: platform-security
+          matchers:
+            - category = security
+          repeat_interval: 24h
+        - receiver: platform-critical      # Teams AND mail
+          matchers:
+            - severity = critical
+          group_wait: 30s
+          repeat_interval: 4h
+        - receiver: platform-notice        # mail, quietly: scale events, digests
+          matchers:
+            - severity = notice
+          group_interval: 30m
+          repeat_interval: 24h
+    receivers:
+      - name: "null"
+      - name: platform-critical
+        teams: {}
+        graphMail: {}
+      - name: platform-security
+        # No resolved post: a "new CVE" alert ends when the CVE stops being new,
+        # not when it is fixed, and saying RESOLVED would be wrong.
+        teams:
+          send_resolved: false
+        graphMail:
+          send_resolved: false
+      - name: platform-email
+        graphMail: {}
+      - name: platform-notice
+        graphMail:
+          send_resolved: false           # a finished scale-up is not news
+    # The config Secret's own keys are mounted at /etc/alertmanager/config/.
+    templates:
+      - '/etc/alertmanager/config/*.tmpl'

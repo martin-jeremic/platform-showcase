@@ -1,0 +1,47 @@
+apiVersion: v2
+name: cert-manager
+description: >-
+  Platform cert-manager chart. Umbrella chart that installs the upstream Jetstack
+  cert-manager controller (and its CRDs) and templates the ClusterIssuers (ACME
+  Let's Encrypt, DNS-01 via Cloudflare) and optional Certificates on top. It
+  deliberately CANNOT template the DNS-01 API-token Secret: that footgun is how a
+  live token with Zone:DNS:Edit on every product zone ended up committed to git in
+  the chart this was forked from. The token is seeded once, out of band.
+type: application
+
+# Version of THIS umbrella chart. Bump on any change to templates or defaults;
+# the gitops descriptor pins the matching git tag.
+#
+# 1.1.0 -- cert-manager v1.20.3 -> v1.21.3. No values change. What the v1.21
+#   breaking changes do here, checked against the render:
+#     - the controller's <fullname>-tokenrequest Role/RoleBinding (create
+#       serviceaccounts/token on its own SA) is no longer rendered, so Argo prunes
+#       it. Nothing here used it: the only issuer solves DNS-01 with the
+#       API-token Secret, not with serviceAccountRef.
+#     - the metrics Service port is renamed tcp-prometheus-servicemonitor ->
+#       http-metrics. The ServiceMonitor selects the container port by name
+#       (targetPort: http-metrics), so scraping is unaffected.
+#     - prometheus.servicemonitor.targetPort/.path were removed and the values
+#       schema is closed; neither is set here (a leftover would fail the render).
+#   The CRDs gain fields only; they ride in the subchart (crds.enabled) and Argo
+#   re-applies them server-side.
+version: 1.1.0
+
+# cert-manager version shipped by the pinned subchart.
+appVersion: "v1.21.3"
+
+keywords:
+  - cert-manager
+  - acme
+  - letsencrypt
+  - tls
+  - dns01
+home: https://cert-manager.io/
+sources:
+  - https://github.com/cert-manager/cert-manager
+
+dependencies:
+  - name: cert-manager
+    version: "v1.21.3"
+    repository: "https://charts.jetstack.io"
+    condition: cert-manager.enabled

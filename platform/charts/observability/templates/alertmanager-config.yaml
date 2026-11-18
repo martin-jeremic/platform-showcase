@@ -1,0 +1,228 @@
+{{- /*
+The Alertmanager config Secret -- rendered by THIS chart, not by
+kube-prometheus-stack (alertmanagerSpec.useExistingSecret: true; the CR's
+configSecret names this Secret).
+
+Why this chart renders it: a route tree in kube-prometheus-stack values could
+only be switched on per cluster by restating the whole route list in every
+cluster values file (Helm replaces lists), and its templateFiles get no tpl, so
+the Grafana URL in every link would have to be typed a second time. Here:
+  - activation is one boolean, notifications.enabled;
+  - the receivers' credential paths are derived from the Key Vault mount;
+  - the Grafana root, the Loki datasource uid and the Alertmanager datasource
+    name are derived from the values that define them
+    (observability.alertmanagerDerivedTmpl);
+  - each audience (notifications.audiences) gets the SAME route tree as the
+    default destination, derived from notifications.config, never restated.
+
+Keys (all mounted by the operator at /etc/alertmanager/config/):
+  alertmanager.yaml       notifications.config, expanded (see values.yaml)
+  <name>.tmpl             each alertmanager/*.tmpl in this chart, raw
+  platform-derived.tmpl    the derived defines
+
+toYaml with NO tpl, exactly like the subchart: Alertmanager's own {{ }} in the
+config strings reaches Alertmanager untouched.
+*/}}
+{{- $am := .Values.kubePromStack.alertmanager }}
+{{- if $am.enabled }}
+{{- if not $am.alertmanagerSpec.useExistingSecret }}
+{{- fail "kubePromStack.alertmanager.alertmanagerSpec.useExistingSecret must be true: this chart renders the Alertmanager config Secret (templates/alertmanager-config.yaml), and two config Secrets would leave it ambiguous which one the CR loads" }}
+{{- end }}
+{{- if $am.templateFiles }}
+{{- fail "kubePromStack.alertmanager.templateFiles is set, but kube-prometheus-stack ignores it under useExistingSecret. Put notification templates in alertmanager/*.tmpl instead." }}
+{{- end }}
+{{- $n := .Values.notifications }}
+{{- $cfg := deepCopy $n.config }}
+{{- if $n.enabled }}
+  {{- $g := $n.graph }}
+  {{- $clientId := toString ($g.clientId | default "") }}
+  {{- if or (not $clientId) (contains "REPLACE_WITH_" $clientId) }}
+    {{- fail (printf "notifications.enabled is true but notifications.graph.clientId is %q. Set the real value (it is not a secret) before enabling a cluster." $clientId) }}
+  {{- end }}
+
+  {{- /* ---- destinations: where a receiver delivers ----
+       The default destination is notifications.graph plus teams-webhook-url and
+       takes every alert no audience claims. Each audience claims the alerts whose
+       `cluster` label is in its `clusters` and has its own sender, recipients and
+       Teams webhook file. Everything else (Graph app, client secret, tenant,
+       vault) is shared. */}}
+  {{- $own := .Values.kubePromStack.prometheus.prometheusSpec.externalLabels.cluster }}
+  {{- $dests := list (dict "path" "notifications.graph" "audience" "" "sender" $g.sender "recipients" $g.recipients) }}
+  {{- $claimed := dict }}
+  {{- range $name, $a := ($n.audiences | default dict) }}
+    {{- /* Spliced into receiver names, a vault object name and a file name. */}}
+    {{- if not (regexMatch "^[a-z0-9-]+$" $name) }}
+      {{- fail (printf "notifications.audiences.%s: an audience name must match ^[a-z0-9-]+$ (it becomes part of receiver names and of the Key Vault object name)" $name) }}
+    {{- end }}
+    {{- $a = $a | default dict }}
+    {{- if not $a.clusters }}
+      {{- fail (printf "notifications.audiences.%s.clusters is empty: an audience with no clusters receives nothing" $name) }}
+    {{- end }}
+    {{- range $c := $a.clusters }}
+      {{- /* Spliced UNESCAPED into the route's regex matcher, so only plain names. */}}
+      {{- if not (regexMatch "^[a-z0-9-]+$" (toString $c)) }}
+        {{- fail (printf "notifications.audiences.%s.clusters: %q is not a cluster name (^[a-z0-9-]+$)" $name $c) }}
+      {{- end }}
+      {{- if eq (toString $c) $own }}
+        {{- fail (printf "notifications.audiences.%s.clusters names %q, this Alertmanager's own cluster (externalLabels.cluster). Its alerts belong to notifications.graph." $name $c) }}
+      {{- end }}
+      {{- /* Routes are tried in order: a second claim would never match, silently. */}}
+      {{- if hasKey $claimed (toString $c) }}
+        {{- fail (printf "notifications.audiences: cluster %q is claimed by both %s and %s" $c (get $claimed (toString $c)) $name) }}
+      {{- end }}
+      {{- $_ := set $claimed (toString $c) $name }}
+    {{- end }}
+    {{- $dests = append $dests (dict "path" (printf "notifications.audiences.%s" $name) "audience" $name "sender" $a.sender "recipients" $a.recipients "clusters" $a.clusters) }}
+  {{- end }}
+
+  {{- /* ---- guards: every fact a receiver needs, before anything renders ---- */}}
+  {{- range $d := $dests }}
+    {{- $v := toString ($d.sender | default "") }}
+    {{- if or (not $v) (contains "REPLACE_WITH_" $v) }}
+      {{- fail (printf "notifications.enabled is true but %s.sender is %q. Set the real value (it is not a secret) before enabling a cluster." $d.path $v) }}
+    {{- end }}
+    {{- if not $d.recipients }}
+      {{- fail (printf "notifications.enabled is true but %s.recipients is empty" $d.path) }}
+    {{- end }}
+    {{- range $r := $d.recipients }}
+      {{- if contains "REPLACE_WITH_" (toString $r) }}
+        {{- fail (printf "%s.recipients contains a placeholder: %q" $d.path $r) }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- if and (gt (len $dests) 1) (not $cfg.route.receiver) }}
+    {{- fail "notifications.config.route.receiver is required when notifications.audiences is set: each audience route copies it as its own catch-all" }}
+  {{- end }}
+  {{- range ($cfg.route.routes | default list) }}
+    {{- if and (gt (len $dests) 1) .routes }}
+      {{- fail "notifications.config.route.routes has nested routes. Audience routes copy one level of child routes only; flatten the route tree or extend templates/alertmanager-config.yaml." }}
+    {{- end }}
+  {{- end }}
+  {{- $mount := include "observability.alertmanagerKvMountPath" . }}
+  {{- $tokenUrl := printf "https://login.microsoftonline.com/%s/oauth2/v2.0/token" (required "notifications.tenantId is required" $n.tenantId) }}
+
+  {{- /* ---- expand the receiver shorthands, once per destination ----
+       The default destination emits every receiver under its own name. An
+       audience emits a copy of each receiver that USES a shorthand, named
+       <audience>-<receiver>; receivers without one ("null") are shared.
+
+       Overrides are applied with `set`, one top-level key at a time -- NOT with
+       sprig merge / mergeOverwrite. Both treat `false` as an empty value: merge
+       fills it back in from the base block, and mergeOverwrite never applies it.
+       devops-notice's `send_resolved: false` rendered as true under merge. */}}
+  {{- $receivers := list }}
+  {{- $audienceRoutes := list }}
+  {{- range $d := $dests }}
+    {{- $to := list }}
+    {{- range $r := $d.recipients }}
+      {{- $to = append $to (dict "emailAddress" (dict "address" $r)) }}
+    {{- end }}
+    {{- $graphMail := dict
+          "url" (printf "https://graph.microsoft.com/v1.0/users/%s/sendMail" $d.sender)
+          "send_resolved" true
+          "http_config" (dict "oauth2" (dict
+              "client_id" $clientId
+              "client_secret_file" (printf "%s/graph-client-secret" $mount)
+              "token_url" $tokenUrl
+              "scopes" (list "https://graph.microsoft.com/.default")))
+          "payload" (dict
+              "message" (dict
+                  "subject" $n.text.emailSubject
+                  "body" (dict "contentType" "HTML" "content" $n.text.emailHtml)
+                  "toRecipients" $to)
+              "saveToSentItems" false) }}
+    {{- $teams := dict
+          "webhook_url_file" (printf "%s/%s" $mount (include "observability.teamsWebhookFile" $d.audience))
+          "send_resolved" true
+          "title" $n.text.teamsTitle
+          "text" $n.text.teamsText }}
+
+    {{- $renamed := dict }}
+    {{- range $r := $cfg.receivers }}
+      {{- $shorthand := or (hasKey $r "teams") (hasKey $r "graphMail") }}
+      {{- if or (not $d.audience) $shorthand }}
+        {{- $out := omit $r "teams" "graphMail" }}
+        {{- if $d.audience }}
+          {{- $_ := set $out "name" (printf "%s-%s" $d.audience $r.name) }}
+          {{- $_ := set $renamed $r.name $out.name }}
+        {{- end }}
+        {{- if hasKey $r "teams" }}
+          {{- $c := deepCopy $teams }}
+          {{- range $k, $v := ($r.teams | default dict) }}{{ $_ := set $c $k $v }}{{ end }}
+          {{- $_ := set $out "msteamsv2_configs" (list $c) }}
+        {{- end }}
+        {{- if hasKey $r "graphMail" }}
+          {{- $c := deepCopy $graphMail }}
+          {{- range $k, $v := ($r.graphMail | default dict) }}{{ $_ := set $c $k $v }}{{ end }}
+          {{- $_ := set $out "webhook_configs" (list $c) }}
+        {{- end }}
+        {{- $receivers = append $receivers $out }}
+      {{- end }}
+    {{- end }}
+
+    {{- /* ---- the audience's route: the default tree, re-pointed ----
+         Its child routes are the top-level child routes (Watchdog, severities,
+         timings) with each receiver swapped for this audience's copy. group_by
+         and the root timings are inherited from the root route. */}}
+    {{- if $d.audience }}
+      {{- $sub := list }}
+      {{- range $rt := ($cfg.route.routes | default list) }}
+        {{- $c := deepCopy $rt }}
+        {{- if hasKey $renamed (toString $rt.receiver) }}
+          {{- $_ := set $c "receiver" (get $renamed (toString $rt.receiver)) }}
+        {{- end }}
+        {{- $sub = append $sub $c }}
+      {{- end }}
+      {{- $catchAll := $cfg.route.receiver }}
+      {{- if hasKey $renamed (toString $catchAll) }}
+        {{- $catchAll = get $renamed (toString $catchAll) }}
+      {{- end }}
+      {{- $audienceRoutes = append $audienceRoutes (dict
+            "matchers" (list (printf "cluster =~ %q" (join "|" $d.clusters)))
+            "receiver" $catchAll
+            "routes" $sub) }}
+    {{- end }}
+  {{- end }}
+  {{- $_ := set $cfg "receivers" $receivers }}
+  {{- /* Audience routes FIRST: a claimed cluster must never fall through to the
+       default destination's severity routes. */}}
+  {{- $_ := set $cfg.route "routes" (concat $audienceRoutes ($cfg.route.routes | default list)) }}
+{{- else }}
+  {{- /* Notifications off: the kube-prometheus-stack default, everything to "null". No
+         receiver is rendered, so no credential file is referenced. */}}
+  {{- $route := deepCopy $cfg.route }}
+  {{- $_ := set $route "receiver" "null" }}
+  {{- $_ := set $route "routes" (list (dict "receiver" "null" "matchers" (list "alertname = \"Watchdog\""))) }}
+  {{- $_ := set $cfg "route" $route }}
+  {{- $_ := set $cfg "receivers" (list (dict "name" "null")) }}
+{{- end }}
+
+{{- /* ---- every route must name a receiver that exists (top level + two levels down) ---- */}}
+{{- $names := list }}
+{{- range $cfg.receivers }}{{ $names = append $names .name }}{{ end }}
+{{- $used := list $cfg.route.receiver }}
+{{- range ($cfg.route.routes | default list) }}
+  {{- $used = append $used .receiver }}
+  {{- range (.routes | default list) }}{{ $used = append $used .receiver }}{{ end }}
+{{- end }}
+{{- range $used }}
+  {{- if not (has . $names) }}
+    {{- fail (printf "notifications.config.route uses receiver %q, which notifications.config.receivers does not define" .) }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ required "kubePromStack.alertmanager.alertmanagerSpec.configSecret is required: it names the Secret this template renders" $am.alertmanagerSpec.configSecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager-config
+type: Opaque
+data:
+  alertmanager.yaml: {{ toYaml $cfg | b64enc | quote }}
+  {{- range $path, $_ := .Files.Glob "alertmanager/*.tmpl" }}
+  {{ base $path }}: {{ $.Files.Get $path | b64enc | quote }}
+  {{- end }}
+  platform-derived.tmpl: {{ include "observability.alertmanagerDerivedTmpl" . | b64enc | quote }}
+{{- end }}

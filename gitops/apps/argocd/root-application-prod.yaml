@@ -1,0 +1,42 @@
+# App-of-apps root for the PROD application layer. Apply this ONE manifest by hand, once, on the
+# Argo CD that runs on aks-product-a-prod, AFTER the repository credentials (setup/prod/README.md):
+#
+#   kubectl -n argocd apply -f argocd/root-application-prod.yaml
+#
+# It renders argocd/overlays/prod, which delivers exactly two objects: the AppProject `product-a`
+# and the ApplicationSet `product-a-prod`. The appset then generates one Application per
+# apps/<svc>/prod/release.yaml, and those files are written ONLY by the approval-gated
+# Promote_Prod stage. So this root deploys no workload on its own: until the first Production
+# approval it generates zero Applications, which is correct.
+#
+# NOT the hub root. The hub's root (declared in gitops/platform) renders argocd/ (stage + demo).
+# Applying either root on the other's cluster would generate Applications for clusters that Argo
+# has never heard of.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: product-a-apps-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # `default`, not `product-a`: this app creates an AppProject and an ApplicationSet in the
+  # argocd namespace. The scoped `product-a` project permits only namespace `product-a`; widening
+  # it so its own root fits would defeat the point of scoping it.
+  project: default
+  source:
+    repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+    targetRevision: main
+    path: argocd/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Safe here: this app owns only the AppProject and the ApplicationSet. It does make
+      # argocd/overlays/prod a privileged path (a bad commit cascades to every generated
+      # Application through their finalizers); the branch policy on main is the control.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

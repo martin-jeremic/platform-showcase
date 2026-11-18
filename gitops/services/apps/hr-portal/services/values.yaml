@@ -1,0 +1,70 @@
+# Non-secret services overrides for the hr-app chart, release hr-portal, cluster aks-org-prod (registered spoke).
+# Hand-maintained: the CD promotion never touches this file (it writes image.yaml and moves
+# chart.version in release.yaml only).
+
+# ── Routing: path-per-app on the single host services.example.com (README, path allocation) ──
+# sectionName pins the route to the TLS listener; without it the route also binds the plain-HTTP
+# listener and the app answers on :80. Listener hostnames match EXACTLY: a stale per-app hostname
+# reports NoMatchingParent while Argo still shows Synced/Healthy.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: true
+  hostnames:
+    - services.example.com
+  path: /hr-portal
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+# The node identity holds AcrPull on the registry: no pull secret. A reference to one that does
+# not exist logs "Unable to retrieve pull secret" on every pod while the pull succeeds: noise that
+# hides real failures.
+imagePullSecrets: []
+
+# ── Runtime configuration (no rebuild per environment) ───────────────────────────────────────
+# The chart renders `env` into a ConfigMap mounted as environment variables; the image's
+# entrypoint.sh writes them to assets/config.json before nginx starts, and the app fetches that
+# file at boot. One image, every environment: promote-by-digest stays true for SPAs.
+# What is NOT runtime: the base path (/hr-portal/) is baked into the bundle at build time, so moving
+# the route without rebuilding the image 404s every asset.
+env:
+  IDENTITY_URL: "https://services.example.com/keycloak/realms/org"
+  IDENTITY_CLIENT: "hr-portal"
+  # Must match the route exactly: the identity provider compares redirect URIs byte for byte.
+  IDENTITY_REDIRECT_URI: "https://services.example.com/hr-portal/"
+  IDENTITY_SCOPE: "openid profile email"
+  API_URL: "https://services.example.com/hr-api"
+
+# All four HR paths are in every HR app's config, so each SPA can link to the others.
+apps:
+  portal: /hr-portal
+  admin: /hr-admin
+  absence: /hr-absence
+  employeeBook: /hr-employee-book
+
+# Each HR frontend owns its OWN ConfigMap (a unique name per release). The old push CD applied
+# one shared ConfigMap out of band; under GitOps an object nobody renders has no owner.
+configMap:
+  create: true
+  name: hr-portal-config
+nameOverride: hr-portal
+fullnameOverride: hr-portal
+
+# ── Capacity ─────────────────────────────────────────────────────────────────────────────────
+# aks-org-prod is a single node that also hosts the identity provider, the broker, the gateway
+# and monitoring. Autoscaling stays off on purpose: a chart default of maxReplicas 10 cannot fit
+# and would only pile up Pending pods. Revisit when a second node is added.
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi

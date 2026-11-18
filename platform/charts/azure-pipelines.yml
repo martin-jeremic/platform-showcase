@@ -1,0 +1,195 @@
+# CI for the platform charts: lint, render, gate, version, tag -- and promote to
+# the island. NO publish stage.
+#
+# Charts are consumed directly from this git repo by Argo CD, at a pinned per-chart
+# tag (traefik-1.2.0), so there is nothing to package or push. Versioning and
+# tagging are automated around one invariant (tools/chart-version.sh):
+#
+#   tag name == <chart directory> + "-" + <Chart.yaml version>
+#
+#   - PR build: a chart whose content moved since its current tag without a version
+#     bump gets its PATCH version bumped by CI, committed back to the PR branch. A
+#     deliberate minor/major bump is left untouched.
+#   - merge to main: the Tag stage cuts the missing annotated tags, pushes them,
+#     then PROMOTES the island: bumps its gitops descriptors and pushes to that
+#     repo's main. A chart merge therefore DEPLOYS to the island on the next Argo
+#     sync -- app-style CD, chosen deliberately for a single-cluster,
+#     single-operator platform. The descriptor stays the rollback point: revert
+#     the `ci: promote ...` commit and Argo rolls back; tags are never moved.
+#     The HUB's descriptors are NOT auto-promoted: four clusters and several teams
+#     consume them, so a hub bump stays a reviewed one-line PR
+#     (component.sh bump) -- the gate the island chose to give up.
+#
+# A tag makes a version AVAILABLE; a descriptor bump makes it LIVE. Keeping those
+# separate is the property an OCI registry would give, without a registry, a push
+# credential or a build agent between "chart edited" and "chart deployable".
+#
+# IT GATES NOTHING UNTIL IT IS A BRANCH POLICY. Azure Repos ignores YAML `pr:`
+# triggers; pull-request validation comes from a Build Validation policy on `main`
+# pointing at this pipeline. Without it, this pipeline runs after the merge it was
+# meant to stop.
+#
+# PERMISSIONS for the build service identity that actually runs jobs (the
+# org-scoped "Project Collection Build Service" in this organisation, not the
+# project-scoped one): Contribute + Create tag on this repo, Contribute on the
+# island gitops repo. Without them the push steps 403 (TF401027).
+#
+# TAGS ARE IMMUTABLE BY CONVENTION, enforced by a tag-protection policy on
+# refs/tags/*. If that ever proves too weak, THAT is the trigger to revisit an
+# OCI registry -- not a second cluster on its own.
+# (This folder is the root of the charts repository, org-platform; with two
+# checkouts each repo lands in $(Build.SourcesDirectory)/<repo name>/.)
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+resources:
+  repositories:
+    # The island's gitops repo: promote target, and the threshold check's other side.
+    - repository: islandGitops
+      type: git
+      name: product-a/product-a-platform-gitops
+      ref: refs/heads/main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  helmVersion: 'v3.17.2'
+  CHARTS_DIR: $(Build.SourcesDirectory)/org-platform
+  ISLAND_DIR: $(Build.SourcesDirectory)/product-a-platform-gitops
+
+stages:
+  - stage: Validate
+    displayName: Lint, render and gate every chart
+    jobs:
+      - job: validate
+        steps:
+          # fetchDepth 0 + fetchTags: the version logic is all tag-existence checks
+          # and diffs against tags. A shallow or tagless checkout (the ADO default)
+          # makes every check come up empty and misjudges all charts at once.
+          # persistCredentials lets the autobump step push to the PR branch.
+          - checkout: self
+            fetchDepth: 0
+            fetchTags: true
+            persistCredentials: true
+          - checkout: islandGitops
+
+          # ---- versioning, half 1: auto-bump on PR builds -----------------------
+          # A chart changed WITHOUT a version bump fails silently everywhere else:
+          # no new tag, the descriptor keeps pinning the old one, Argo renders stale
+          # content and reports Synced. On a PR, fix it instead of failing it.
+          #
+          # The PR build checks out a detached MERGE commit, so the push must target
+          # the real source branch:
+          #   1. bump on the source-branch tip and push it
+          #   2. return to the merge commit and re-apply the bump in the working
+          #      tree, so THIS build lints and renders the post-bump state
+          # The push triggers a fresh PR build; autobump is idempotent, so that
+          # build finds nothing to bump -- no loop -- and it is the run the branch
+          # policy waits for.
+          - script: |
+              set -euo pipefail
+              cd "$CHARTS_DIR"
+              MERGE_HEAD=$(git rev-parse HEAD)
+              SRC="${SOURCE_BRANCH#refs/heads/}"
+              git fetch origin "$SRC"
+              git checkout --force --detach FETCH_HEAD
+              bash tools/chart-version.sh autobump | tee "$AGENT_TEMPDIRECTORY/autobump.out"
+              if grep -q '^bumped' "$AGENT_TEMPDIRECTORY/autobump.out"; then
+                git config user.name  "platform-ci"
+                git config user.email "ci-bot@example.com"
+                git commit -am "ci: auto-bump patch version of charts changed without a bump"
+                git push origin "HEAD:refs/heads/$SRC"
+                echo "##vso[task.logissue type=warning]auto-bumped chart versions and pushed to $SRC -- the follow-up build is the one that counts"
+              fi
+              git checkout --force --detach "$MERGE_HEAD"
+              bash tools/chart-version.sh autobump
+            displayName: 'Version: auto-bump changed charts (PR only)'
+            condition: eq(variables['Build.Reason'], 'PullRequest')
+            env:
+              SOURCE_BRANCH: $(System.PullRequest.SourceBranch)
+
+          # ---- versioning, half 2: the tripwire on main ------------------------
+          # After the PR autobump this state should be unreachable on main; it is a
+          # loud guard for the one path around it, a direct push. When it fires the
+          # build fails and the Tag stage is skipped, so nothing stale is cut.
+          - script: bash tools/chart-version.sh check
+            workingDirectory: $(CHARTS_DIR)
+            displayName: 'Version: changed charts carry a bumped version'
+            condition: ne(variables['Build.Reason'], 'PullRequest')
+
+          - task: HelmInstaller@1
+            inputs:
+              helmVersionToInstall: $(helmVersion)
+
+          # Builds dependencies (charts/ is not committed), lints and renders every
+          # chart with every ci/*.yaml, applies the render gates and the refusal
+          # tests, validates dashboards and compares the two log-contract parsers.
+          - script: bash tools/check-platform.sh
+            workingDirectory: $(CHARTS_DIR)
+            displayName: 'Charts: lint, render, gates, refusals'
+
+          # promtool from the Prometheus image the observability chart renders: the
+          # rules are checked by the version that will evaluate them.
+          - script: |
+              set -euo pipefail
+              img=$(helm template o observability -n observability --api-versions monitoring.coreos.com/v1 \
+                      -f observability/ci/island-values.yaml \
+                    | awk '/^kind: Prometheus$/{p=1} p && $1=="image:"{gsub(/"/,"",$2); print $2; exit}')
+              echo "promtool from $img"
+              docker run --rm -v "$PWD/observability/rules:/rules:ro" --entrypoint /bin/promtool "$img" \
+                check rules $(cd observability/rules && ls *.yaml | sed 's#^#/rules/#')
+              docker run --rm -v "$PWD/observability/rules:/rules:ro" --entrypoint /bin/promtool "$img" \
+                test rules $(cd observability/rules/tests && ls *.yaml | sed 's#^#/rules/tests/#')
+            workingDirectory: $(CHARTS_DIR)
+            displayName: 'Rules: promtool check + unit tests'
+
+          - script: bash tools/check-log-rules.sh
+            workingDirectory: $(CHARTS_DIR)
+            displayName: 'Log rules: lokitool, contract fields, dashboard threshold'
+
+  - stage: Tag
+    displayName: Cut missing tags, promote the island
+    dependsOn: Validate
+    # Only a validated main commit earns a tag. Tag pushes do not retrigger this
+    # pipeline (the trigger is branch-based), and the gitops push triggers only the
+    # gitops repo's own pipeline -- no loop.
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: tag
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            fetchTags: true
+            persistCredentials: true
+          # Full depth: the promote step commits on top of main and pushes.
+          - checkout: islandGitops
+            fetchDepth: 0
+            persistCredentials: true
+
+          # Idempotent: existing tags are skipped; the tool cannot move a tag.
+          - script: |
+              set -euo pipefail
+              git config user.name  "platform-ci"
+              git config user.email "ci-bot@example.com"
+              bash tools/chart-version.sh tag --push
+            workingDirectory: $(CHARTS_DIR)
+            displayName: 'Cut and push missing annotated tags'
+
+          # AFTER the tag push, so a descriptor can never reference a tag origin
+          # lacks (the tool re-checks origin anyway). Components without a
+          # descriptor are skipped. Rollback = revert the promote commit.
+          - script: |
+              set -euo pipefail
+              git -C "$ISLAND_DIR" config user.name  "platform-ci"
+              git -C "$ISLAND_DIR" config user.email "ci-bot@example.com"
+              bash tools/chart-version.sh promote "$ISLAND_DIR/platform" aks-product-a-prod --push
+            workingDirectory: $(CHARTS_DIR)
+            displayName: 'Promote: bump the island descriptors to the new tags'

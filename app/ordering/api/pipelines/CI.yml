@@ -1,0 +1,78 @@
+# ordering-api CI (NestJS, company build-once flow). Register as `ordering-api-ci`.
+#
+#   Versioning (semantic-release dry run) -> Lint (docker build --target lint-stage) ->
+#   BuildAndPush (image once, digest, deploy-meta-ordering-api, chart push)
+# The CD is the standard promote-stage.yml pipeline (same shape as app/payments/pipelines/api/CD.yml).
+#
+# WHY LINT IS GATED ON isReleaseReady TOO, not only the build:
+#   on a non-releasing commit the build is skipped anyway, and a lint stage that runs then produces
+#   a green check on a run that ships nothing. Worse, the build stage depends on Lint: if Lint ran
+#   while Versioning said "no release", a later re-run of just the build would not be gated by
+#   the lint of that commit. Gating both on the same output keeps "this version was linted" true.
+#
+# The lint runs THROUGH THE DOCKERFILE (target lint-stage), so it uses exactly the Node version and
+# the dependency tree the image is built with. The RUN in that stage is the gate: the build fails
+# when eslint fails. (The old pipeline also `docker run` the lint image afterwards, which started
+# the base image's default node REPL and exited 0: a step that could not fail. Dropped. So was a
+# separate "build" job whose dist/ output nothing downstream consumed.)
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+variables:
+  # Secure file holding the private feed's .npmrc (registry URL + credential).
+  npmrcSecureFile: npmrc-private-feed
+
+stages:
+  - template: stages/versioning-semantic-release.yml@templates
+
+  - stage: Lint
+    displayName: Lint (docker build --target lint-stage)
+    dependsOn: Versioning
+    condition: and(succeeded(), eq(dependencies.Versioning.outputs['SemanticVersioning.DetermineVersion.isReleaseReady'], 'true'))
+    jobs:
+      - job: Lint
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - task: DownloadSecureFile@1
+            name: npmrc
+            displayName: Download .npmrc (secure file)
+            inputs:
+              secureFile: $(npmrcSecureFile)
+          # The credential reaches the build as a BuildKit secret, never as a build argument.
+          # Paths reach the script through env:, not inline macros.
+          - bash: |
+              set -euo pipefail
+              DOCKER_BUILDKIT=1 docker build \
+                --secret "id=npmrc,src=$NPMRC_PATH" \
+                --target lint-stage \
+                --progress plain \
+                .
+            displayName: eslint in the lint-stage target
+            env:
+              NPMRC_PATH: $(npmrc.secureFilePath)
+
+  - template: stages/build-stage.yml@templates
+    parameters:
+      dependsOn: [Versioning, Lint]
+      images:
+        - name: ordering-api
+          dockerfile: Dockerfile
+          buildContext: .
+      chartName: ordering-api
+      chartDir: helm/ordering-api
+      npmrcSecureFile: npmrc-private-feed

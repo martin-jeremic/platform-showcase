@@ -1,0 +1,49 @@
+{{- /*
+Command consumer: the only long-running pod in this chart. It consumes the portal's
+"refresh from source" command and runs the same load pipeline as the CronJobs. It exposes no HTTP
+surface: authorisation stays in the API that publishes the command.
+
+replicas: 1 and Recreate, both deliberate. The consumer serialises loads (prefetch 1) because each
+load rewrites a whole dataset version; a second replica would only add contention on the same
+tables. A RollingUpdate's surge pod is exactly such a second replica, so a rollout stops the old
+pod before starting the new one: a load in flight finishes or fails alone.
+*/ -}}
+{{- if .Values.commandConsumer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "refdata.fullname" . }}-consumer
+  labels:
+    {{- include "refdata.labels" . | nindent 4 }}
+    example.com/role: command-consumer
+  {{- if .Values.azureKeyVault.enabled }}
+  annotations:
+    secret.reloader.stakater.com/reload: {{ .Values.azureKeyVault.syncedSecretName | quote }}
+  {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "refdata.selectorLabels" . | nindent 6 }}
+      example.com/role: command-consumer
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "refdata.selectorLabels" . | nindent 8 }}
+        example.com/role: command-consumer
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+    spec:
+      {{- include "refdata.podSpecCommon" . | nindent 6 }}
+      containers:
+        {{- /* No args = consumer mode; the in-process scheduler is off (CronJobs own scheduling). */}}
+        {{- $env := list (dict "name" "RefData__SchedulerEnabled" "value" "false") }}
+        {{- include "refdata.container" (dict "root" . "args" (list) "extraEnv" $env "resources" .Values.commandConsumer.resources) | nindent 8 }}
+      volumes:
+        {{- include "refdata.volumes" . | nindent 8 }}
+{{- end }}

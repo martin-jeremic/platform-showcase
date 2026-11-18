@@ -1,0 +1,20 @@
+apiVersion: v2
+name: argocd-cluster-registry
+description: >
+  Declarative registry of remote clusters (and tenancy AppProjects) for the hub
+  Argo CD. Renders, per managed cluster, an ExternalSecret that the External
+  Secrets Operator turns into the secret-type=cluster Secret Argo CD reads --
+  with the bearer token pulled from Azure Key Vault, never from git or values.
+type: application
+version: 0.2.0
+appVersion: "1.0.0"
+keywords:
+  - argocd
+  - multi-cluster
+  - external-secrets
+# 0.2.0 -- the `inline` token source is removed. It rendered a plain Secret from a
+#   token passed with --set, which meant the chart could never be rendered by Argo
+#   itself: an Argo render had no token to pass and would have overwritten every
+#   live cluster Secret with an empty one, disconnecting every spoke. Registration
+#   therefore stayed hand-applied (gitops setup/) until the token moved to Key
+#   Vault. ExternalSecret is now the only mode, and the chart is safe to self-manage.

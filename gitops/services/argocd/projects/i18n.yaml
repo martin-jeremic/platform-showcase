@@ -1,0 +1,44 @@
+# AppProject services-i18n: tenancy + RBAC boundary for namespace `i18n` (i18n-api, i18n-app).
+# The `services` ApplicationSet sets spec.project to services-<destination.namespace>, so a
+# namespace without a file in this folder gets no Applications at all (fail closed).
+# sync-wave -1: the root app applies the AppProjects before the ApplicationSet (wave 0).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: services-i18n
+  namespace: argocd-hub
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    app.kubernetes.io/part-of: services
+spec:
+  description: Company services in namespace i18n, dev (hub) and services (aks-org-prod)
+  sourceRepos:
+    - https://dev.azure.com/example-org/platform/_git/services-gitops
+    - orgacr.azurecr.io/helm
+  destinations:
+    # dev: the hub itself, addressed in-cluster.
+    - server: https://kubernetes.default.svc
+      namespace: i18n
+    # services: the registered production spoke.
+    - name: aks-org-prod
+      namespace: i18n
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  roles:
+    # Subject proj:services-i18n:developer, object services-i18n/*. ONE MALFORMED LINE DISABLES EVERY POLICY OF THIS
+    # PROJECT ("Failed to load casbin policies" in argocd-server), and nothing validates it on
+    # sync. Validate offline before merging (README, "Access model").
+    - name: developer
+      description: Read, sync, resource actions (e.g. restart) and pod logs. No edit, delete or create.
+      groups:
+        - argocd-i18n   # Keycloak realm org-test; membership is managed in Keycloak, never in Git
+      policies:
+        - p, proj:services-i18n:developer, applications, get, services-i18n/*, allow
+        - p, proj:services-i18n:developer, applications, sync, services-i18n/*, allow
+        - p, proj:services-i18n:developer, applications, action/*, services-i18n/*, allow
+        - p, proj:services-i18n:developer, logs, get, services-i18n/*, allow

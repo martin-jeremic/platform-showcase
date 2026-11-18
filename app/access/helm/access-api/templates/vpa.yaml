@@ -1,0 +1,34 @@
+{{- /*
+VerticalPodAutoscaler for the API. Needs the VPA CRDs and controllers (platform chart `vpa`); the
+chart does not check for them, so enable it only on clusters that run VPA.
+Read a recommendation with:  kubectl get vpa access-api -o jsonpath='{.status.recommendation}'
+*/ -}}
+{{- if .Values.verticalPodAutoscaler.enabled }}
+{{- $mode := .Values.verticalPodAutoscaler.updateMode | toString }}
+{{- if not (has $mode (list "Off" "Initial" "Recreate" "Auto")) }}
+{{- fail (printf "verticalPodAutoscaler.updateMode must be Off, Initial, Recreate or Auto, got %q" $mode) }}
+{{- end }}
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "access-api.fullname" . }}
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "access-api.fullname" . }}
+  updatePolicy:
+    {{- /* Quoted: an unquoted Off is a YAML 1.1 boolean to some parsers, and the API rejects false. */}}
+    updateMode: {{ $mode | quote }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledResources:
+          {{- toYaml .Values.verticalPodAutoscaler.controlledResources | nindent 10 }}
+        minAllowed:
+          {{- toYaml .Values.verticalPodAutoscaler.minAllowed | nindent 10 }}
+        maxAllowed:
+          {{- toYaml .Values.verticalPodAutoscaler.maxAllowed | nindent 10 }}
+{{- end }}

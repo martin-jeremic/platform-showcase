@@ -1,0 +1,79 @@
+{{- /*
+Render-time invariants. Renders NO object -- it exists only to fail the render when
+two values that must agree do not. Under Argo a failed render is a ComparisonError
+on the Application and nothing is applied, which is the point: the alternative is
+a cluster that syncs green and mislabels its data or drops its alerts.
+
+1. One cluster identity. Metrics take `cluster` from externalLabels.cluster
+   (through the default scrape class); logs take it from alloyPipeline.cluster. If
+   they differ, every dashboard that joins logs to metrics on `cluster`, and every
+   alert's Logs link, points at a stream that does not exist.
+
+2. The Loki ruler reads the directory the rules sidecar writes. When they differed
+   (/var/loki/rules vs /rules) no rule could ever load, and nothing said so: the
+   ruler ran, found no tenants, and logged nothing.
+
+3. The Loki ruler sends to THIS release's Alertmanager, whose Service is named
+   <kubePromStack.fullnameOverride>-alertmanager -- a value the Loki subchart cannot
+   read. A wrong host fails only at notification time, inside the Loki pod.
+
+4. Loki's index store matches its chunk store (schemaConfig object_store ==
+   storage.type). Otherwise chunks go to blob and the index is looked for on disk.
+
+5. Every PVC names an explicit StorageClass. An empty one falls through to the
+   cluster `default` class, reclaimPolicy Delete -- Grafana's SQLite DB is the one
+   copy of the API-created Orgs.
+
+6. The Grafana dashboard sidecar searches exactly the release namespace, where the
+   dashboard ConfigMaps land. kube-prometheus-stack's own default is ALL.
+
+7. Production floor: every long-running workload here carries a priority class.
+*/ -}}
+{{- $cluster := required "kubePromStack.prometheus.prometheusSpec.externalLabels.cluster is required: it is this cluster's identity on every metric and alert" .Values.kubePromStack.prometheus.prometheusSpec.externalLabels.cluster -}}
+{{- if and .Values.components.alloy (ne (toString .Values.alloyPipeline.cluster) (toString $cluster)) -}}
+{{- fail (printf "alloyPipeline.cluster (%q) differs from kubePromStack.prometheus.prometheusSpec.externalLabels.cluster (%q): logs and metrics would name this cluster differently. Set both to the same value." (toString .Values.alloyPipeline.cluster) (toString $cluster)) -}}
+{{- end -}}
+{{- $sidecarFolder := required "loki.sidecar.rules.folder is required: the Loki ruler reads its rules from it" .Values.loki.sidecar.rules.folder -}}
+{{- $rulerDir := dig "storage" "local" "directory" "" .Values.loki.loki.rulerConfig -}}
+{{- if ne (toString $rulerDir) (toString $sidecarFolder) -}}
+{{- fail (printf "loki.loki.rulerConfig.storage.local.directory (%q) differs from loki.sidecar.rules.folder (%q): the ruler would read a directory the rules sidecar never writes, and no log alert rule would load." (toString $rulerDir) (toString $sidecarFolder)) -}}
+{{- end -}}
+{{- $amUrl := tpl (required "loki.loki.rulerConfig.alertmanager_url is required: without it the Loki ruler evaluates log alerts and sends them nowhere" .Values.loki.loki.rulerConfig.alertmanager_url) $ -}}
+{{- $amPort := dig "alertmanager" "service" "port" 9093 .Values.kubePromStack -}}
+{{- $amWant := printf "http://%s-alertmanager.%s.svc:%v" (required "kubePromStack.fullnameOverride is required: Service names (Alertmanager, Prometheus) derive from it" .Values.kubePromStack.fullnameOverride) .Release.Namespace $amPort -}}
+{{- if ne $amUrl $amWant -}}
+{{- fail (printf "loki.loki.rulerConfig.alertmanager_url renders to %q, but this release's Alertmanager is %q. The Loki ruler would send log alerts nowhere." $amUrl $amWant) -}}
+{{- end -}}
+{{- $storeType := toString .Values.loki.loki.storage.type -}}
+{{- range .Values.loki.loki.schemaConfig.configs -}}
+{{- if ne (toString .object_store) $storeType -}}
+{{- fail (printf "loki.loki.schemaConfig object_store %q (from %s) differs from loki.loki.storage.type %q: Loki would write chunks to one store and look for the index in another" (toString .object_store) (toString .from) $storeType) -}}
+{{- end -}}
+{{- end -}}
+{{- if not .Values.kubePromStack.grafana.persistence.storageClassName -}}
+{{- fail "kubePromStack.grafana.persistence.storageClassName is required: empty falls through to the cluster default class (reclaimPolicy Delete), and Grafana's SQLite DB is the only copy of the API-created Orgs" -}}
+{{- end -}}
+{{- if not .Values.loki.singleBinary.persistence.storageClass -}}
+{{- fail "loki.singleBinary.persistence.storageClass is required: never let a PVC fall through to the cluster default class" -}}
+{{- end -}}
+{{- if and .Values.components.tempo (not .Values.tempo.persistence.storageClassName) -}}
+{{- fail "tempo.persistence.storageClassName is required when components.tempo is true" -}}
+{{- end -}}
+{{- $search := .Values.kubePromStack.grafana.sidecar.dashboards.searchNamespace -}}
+{{- if ne (toString $search) .Release.Namespace -}}
+{{- fail (printf "kubePromStack.grafana.sidecar.dashboards.searchNamespace is %q, but the dashboard ConfigMaps land in the release namespace %q. Name it explicitly; unset inherits kube-prometheus-stack's ALL, which lets any namespace inject dashboards." (toString $search) .Release.Namespace) -}}
+{{- end -}}
+{{- $prio := dict
+      "kubePromStack.prometheusOperator" .Values.kubePromStack.prometheusOperator.priorityClassName
+      "kubePromStack.prometheus.prometheusSpec" .Values.kubePromStack.prometheus.prometheusSpec.priorityClassName
+      "kubePromStack.alertmanager.alertmanagerSpec" .Values.kubePromStack.alertmanager.alertmanagerSpec.priorityClassName
+      "kubePromStack.grafana" .Values.kubePromStack.grafana.priorityClassName
+      "loki.singleBinary" .Values.loki.singleBinary.priorityClassName -}}
+{{- range $where, $p := $prio -}}
+{{- if not $p -}}
+{{- fail (printf "%s.priorityClassName is empty: the production floor runs every long-running workload at system-cluster-critical (DaemonSets one tier higher)" $where) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.components.alloy (ne (toString .Values.alloy.controller.priorityClassName) "system-node-critical") -}}
+{{- fail "alloy.controller.priorityClassName must be system-node-critical: a per-node DaemonSet must be able to preempt on its own node, or it sits Pending when the node is full" -}}
+{{- end -}}

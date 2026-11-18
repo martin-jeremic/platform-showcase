@@ -1,0 +1,20 @@
+# One version for the whole repository: the four deployables release together from main.
+# Each component's CI is path-filtered, so an unrelated change does not rebuild it, but when it
+# does build it takes the repository's next version.
+strategies:
+  - Mainline
+
+major-version-bump-message: '^(breaking|BREAKING CHANGE|feat!).*'
+minor-version-bump-message: '^feat.*'
+patch-version-bump-message: '^(fix|chore|refactor|perf|style|test|docs|build|ci).*'
+no-bump-message: '^(skip|no-bump).*'
+
+commit-message-incrementing: Enabled
+
+branches:
+  main:
+    regex: ^main$
+    label: ''
+    increment: Patch
+    track-merge-target: false
+    is-release-branch: true

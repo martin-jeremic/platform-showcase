@@ -1,0 +1,22 @@
+apiVersion: v2
+name: postgres-exporter
+description: >-
+  prometheus-community postgres_exporter pointed at the EXTERNAL Azure Database
+  for PostgreSQL Flexible Server that backs Keycloak. No part of that server runs
+  in the cluster, which makes this the one platform component that exists purely
+  to observe something outside it. Credentials come from Azure Key Vault over the
+  Secrets Store CSI driver, following the rabbitmq chart's pattern exactly.
+  Written as a small Deployment rather than a wrapper around the upstream chart:
+  the synced Secret only materialises while a pod mounts the SecretProviderClass
+  volume, and wiring that mount plus the identity label through a third-party
+  chart's escape hatches is more moving parts than the templates here.
+type: application
+version: 1.0.0
+# postgres_exporter release, used as the default image tag.
+appVersion: "v0.20.1"
+keywords:
+  - prometheus
+  - postgres
+  - exporter
+sources:
+  - https://github.com/prometheus-community/postgres_exporter

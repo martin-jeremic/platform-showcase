@@ -1,0 +1,32 @@
+# OpenTofu: state, plans and real variable files never belong in Git.
+# A pulled state file holds secrets but does not match *.tfstate, hence the extra patterns.
+.terraform/
+*.tfstate
+*.tfstate.*
+*state*.json
+*.tfplan
+*.plan
+terraform.tfvars
+*.auto.tfvars
+secrets*.tfvars
+!*.tfvars.example
+
+# Helm: vendored subcharts are rebuilt from Chart.lock (helm dependency build)
+platform/charts/*/charts/*.tgz
+app/**/charts/*.tgz
+
+# Local tooling and caches
+__pycache__/
+*.pyc
+.matrix.tmp
+.helm-cache/
+node_modules/
+bin/
+obj/
+.vs/
+*.user
+.env
+!.env.example
+
+# Planning notes kept outside the published sample
+implementation-plan.md

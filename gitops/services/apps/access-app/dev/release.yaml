@@ -1,0 +1,10 @@
+# Env descriptor read by the `services` ApplicationSet. Its PRESENCE deploys access-app to dev.
+# chart.version is written by the CD promotion; chart.name and destination are hand-seeded once.
+chart:
+  name: "access-app"
+  version: "2.1.1"
+# dev = the hub itself, addressed in-cluster. `name` stays present and empty: missingkey=error.
+destination:
+  server: "https://kubernetes.default.svc"
+  name: ""
+  namespace: access

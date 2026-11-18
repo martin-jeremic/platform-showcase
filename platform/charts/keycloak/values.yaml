@@ -1,0 +1,370 @@
+# =============================================================================
+# keycloak -- BASE values
+# =============================================================================
+# Sync wave 4. The platform's identity provider: every SSO'd surface on the
+# cluster (Argo CD, Grafana, the application) authenticates here, which makes it
+# the one component whose outage is an outage of everything.
+#
+# FIVE THINGS CHANGED FROM THE FORK, each a production defect:
+#
+#   1. KC_DB: mssql -> postgres, with a real JDBC URL. The fork pointed at SQL
+#      Server; this platform runs Azure Database for PostgreSQL Flexible Server.
+#   2. replicaCount 1 -> 2, CLUSTERED. One replica was a single point of failure
+#      for every SSO'd surface, and every restart or node drain logged out every
+#      user. Clustering needed a headless Service the fork did not have.
+#   3. All probes were disabled, so Kubernetes could not tell whether Keycloak was
+#      serving -- a wedged JVM stayed in the Service indefinitely.
+#   4. authMode servicePrincipal -> workloadIdentity.
+#   5. The bootstrap admin password was commented out of the Key Vault list, so
+#      every environment inherited the image's baked default admin password.
+
+global:
+  imageRegistry: ""
+
+# The custom image: Keycloak 26.7 plus the RabbitMQ event SPI, published to the
+# product registry. Pinned by DIGEST in the cluster values -- a tag can be moved, a
+# digest cannot, and this container holds every credential in the platform.
+image:
+  registry: "productacr.azurecr.io"
+  repository: "keycloak"
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# The registry is attached to the cluster through the kubelet identity (AcrPull),
+# so no pull secret is needed.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+podAnnotations: {}
+deploymentAnnotations: {}
+
+# -- Stakater Reloader --------------------------------------------------------
+# LOAD-BEARING for Key Vault rotation: the CSI driver updates the synced Secret in
+# place, but env vars injected via secretKeyRef are fixed for the container's
+# lifetime, so without a restart the pod keeps using the old password. The
+# annotation goes on the DEPLOYMENT (templates/deployment.yaml), where Reloader
+# reads it -- not on the pod template.
+reloader:
+  enabled: true
+  mode: auto
+
+podSecurityContext:
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsUser: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# 2 replicas, CLUSTERED. Raising this without clustering.enabled gives N
+# unclustered servers behind one Service, which is worse than one.
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+nodeSelector:
+  pool: infra
+tolerations:
+  - key: workload
+    operator: Equal
+    value: infra
+    effect: NoSchedule
+affinity: {}
+
+# HARD spread.
+#
+# NO labelSelector here, deliberately. The template derives it from
+# keycloak.selectorLabels -- the same helper that stamps the pod labels -- so the
+# two cannot drift. Hardcoding it is what broke this: the value read
+# `app.kubernetes.io/name: keycloak` while keycloak.name resolved to the chart name
+# of the time, which was prefixed. The selector matched zero pods, so every domain
+# counted 0, skew was permanently 0, and the constraint was vacuously satisfied
+# while reading as correct. Both replicas sat on one infra node for weeks. (The
+# argocd chart documents the same trap in the opposite direction.)
+#
+# minDomains pairs with maxSkew and is the half that survives a node rotation:
+# with it unset, skew is measured only across domains that already exist, so two
+# replicas on the single Ready node during an `az aks start` compute skew 0 and are
+# admitted. minDomains 2 forces the global minimum to 0 while fewer than two nodes
+# are eligible, so the second replica stays Pending until a second node is Ready.
+# Requires whenUnsatisfiable DoNotSchedule and is GA from Kubernetes 1.30. Safe
+# only because the infra pool floors at min_count 2.
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 2
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+priorityClassName: system-cluster-critical
+
+# ---------------------------------------------------------------------------
+# Infinispan clustering via jgroups DNS_PING
+# ---------------------------------------------------------------------------
+# THREE PIECES MUST AGREE, and nothing warns you if they do not:
+#   - clustering.enabled          renders the headless Service + jgroups port
+#   - KC_CACHE_STACK: kubernetes  selects the DNS_PING stack        (config.options)
+#   - -Djgroups.dns.query=<FQDN>  points it at the headless Service (config.options)
+#
+# Get one wrong and each pod forms its own single-member cluster: no error, no
+# unhealthy pod, just users randomly logged out as the Gateway balances them onto
+# the replica that does not hold their session.
+#
+# DNS_PING rather than KUBE_PING: KUBE_PING queries the Kubernetes API for pods and
+# needs a Role granting pod list/get. DNS_PING needs only DNS.
+clustering:
+  enabled: true
+  port: 7800
+
+keycloak:
+  # Empty = use the image ENTRYPOINT as built (`kc.sh start --verbose`).
+  args: []
+  extraEnv: []
+
+# -- Azure Key Vault ----------------------------------------------------------
+# The `secrets` list is the single source of truth -- it drives the
+# SecretProviderClass, the synced Secret's keys, and the container env vars.
+azureKeyVault:
+  enabled: true
+
+  # workloadIdentity (default) | vmManagedIdentity | servicePrincipal.
+  # servicePrincipal needs an in-cluster clientid/clientsecret Secret bootstrapped
+  # out of band, and it expires. vmManagedIdentity authenticates as the KUBELET
+  # identity, which on the forked platform held Key Vault Secrets User on the whole
+  # vault -- any pod able to create an SPC could read Keycloak's DB password.
+  authMode: workloadIdentity
+
+  # Per cluster.
+  workloadIdentityClientId: ""
+  # Must stay empty unless authMode is vmManagedIdentity.
+  kubeletClientId: ""
+
+  tenantId: ""
+  keyvaultName: ""
+  secretPrefix: "keycloak"
+  # servicePrincipal mode only.
+  credentialsSecretName: ""
+  syncedSecretName: "keycloak-kv-sync"
+  secretProviderClassName: "keycloak-secret-provider"
+
+  # The CSI driver fails the ENTIRE mount if any one objectName is missing from the
+  # vault, leaving the pod in ContainerCreating with no useful event. Seed all three
+  # before first sync (gitops/platform island seed-secrets.ps1).
+  secrets:
+    - kvName: db--password
+      key: keycloak.dbPassword
+      env: KC_DB_PASSWORD
+    # The SAME value as rabbitmq--password: the broker reads one vault object, the
+    # SPI the other. If they drift, Keycloak starts healthy and silently publishes
+    # no events.
+    - kvName: rabbitmq--password
+      key: rabbitmq.password
+      env: RABBITMQ_PASSWORD
+    # ENABLED, unlike the fork where it was commented out -- which meant every
+    # environment inherited the Dockerfile's baked default admin password, a known
+    # default on the component guarding every other component.
+    - kvName: admin--password
+      key: keycloak.adminPassword
+      env: KC_BOOTSTRAP_ADMIN_PASSWORD
+
+# -- Non-sensitive configuration -> ConfigMap -> envFrom -----------------------
+config:
+  # BOTH the HTTPRoute hostname and the basis for KC_HOSTNAME. The templates
+  # `required` it: a wrong or empty value makes Keycloak derive issuer and redirect
+  # URLs from the pod's internal address, and every OIDC client breaks in a way that
+  # only appears at login.
+  host: ""
+
+  keycloak:
+    # Postgres, NOT mssql. Per cluster because it names the server.
+    dbUrl: ""
+    dbUsername: ""
+
+  rabbitmq:
+    # In-cluster FQDN of the wave-3 broker. Cross-namespace, so the short name does
+    # not resolve from here.
+    host: "rabbitmq.rabbitmq.svc.cluster.local"
+    port: "5672"
+    # Not `guest`: the SPI falls back to guest when RABBITMQ_USERNAME is unset, and
+    # the broker's default user is the platform user, not guest.
+    user: "platform"
+    queue: ""
+    brokerName: ""
+    exchangeName: "keycloak-events"
+
+  options:
+    KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
+
+    # -- Database --
+    KC_DB: "postgres"
+    KC_TRANSACTION_XA_ENABLED: "false"
+
+    # -- HTTP / reverse proxy correctness --
+    # TLS terminates at the Traefik Gateway, so Keycloak serves plain HTTP inside
+    # the cluster and must be told to trust the proxy's forwarded headers. Without
+    # KC_PROXY_HEADERS, issuer and redirect URLs come out as the pod's internal
+    # address and every OIDC client breaks.
+    KC_HTTP_ENABLED: "true"
+    KC_HTTP_PORT: "8080"
+    KC_PROXY_HEADERS: "xforwarded"
+    # HTTPS listener OFF: nothing terminates TLS here.
+    KC_HTTPS_ENABLED: "false"
+    # Serving path -- the admin/frontend URLs, the HTTPRoute path and the
+    # ServiceMonitor path all derive from this one value.
+    KC_HTTP_RELATIVE_PATH: "/keycloak"
+
+    # -- Hostname --
+    # KC_HOSTNAME is NOT set here: templates/configmap.yaml builds it as a full URL
+    # from config.host + KC_HTTP_RELATIVE_PATH (hostname:v2).
+    # STRICT on. Keycloak refuses to infer its own hostname from request headers,
+    # which is correct behind a proxy: header-derived hostnames are
+    # attacker-controllable and produce host-header injection into password-reset
+    # links. The fork set it false everywhere, production included.
+    KC_HOSTNAME_STRICT: "true"
+    # Deliberately NOT set: KC_HOSTNAME_STRICT_HTTPS is removed in Keycloak 26
+    # (hostname:v2), and setting a removed option is a startup error.
+
+    # -- Clustering --
+    KC_CACHE: "ispn"
+    KC_CACHE_STACK: "kubernetes"
+    # -Djgroups.dns.query MUST be the headless Service FQDN. Set per cluster so the
+    # namespace is explicit rather than assumed.
+    JAVA_OPTS_APPEND: ""
+
+    # -- Health / metrics --
+    KC_HEALTH_ENABLED: "true"
+    # Prometheus metrics on the MANAGEMENT interface (:9000). The path inherits
+    # KC_HTTP_RELATIVE_PATH, so the real URL is :9000/keycloak/metrics -- the
+    # ServiceMonitor derives it from the same value.
+    KC_METRICS_ENABLED: "true"
+    # Histogram buckets for http_server_requests_seconds_*. Metrics alone emit only
+    # _count and _sum; a p95 panel reads histogram_quantile over _bucket.
+    KC_HTTP_METRICS_HISTOGRAMS_ENABLED: "true"
+
+    # Registers the RabbitMQ event SPI, which is what makes the wave-3 broker a
+    # hard dependency of this component.
+    KC_EVENT_LISTENERS: "rabbitmq"
+
+    # Dropped from the fork: KC_PROXY: "edge" is superseded by KC_PROXY_HEADERS and
+    # removed in Keycloak 26 -- keeping it is a startup failure, not a warning.
+    # null removes a key a lower layer might set.
+    KC_PROXY: null
+
+  extra: {}
+
+# -- Non-Key-Vault fallback ---------------------------------------------------
+# Unused while azureKeyVault.enabled is true. The chart deliberately does NOT
+# template this Secret: in KV mode the CSI driver owns it, and a Helm-managed Secret
+# of the same name would fight the driver for ownership and put credentials in git.
+existingSecret:
+  name: "keycloak-db-secret"
+  secrets:
+    - key: password
+      env: KC_DB_PASSWORD
+
+serviceAccount:
+  # Must be true: the workload-identity annotation lives on the ServiceAccount.
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  # Keycloak 26 management interface: health and metrics, cluster-internal only.
+  # NOT reachable through the Gateway and must never be -- /keycloak/metrics is
+  # unauthenticated.
+  managementPort: 9000
+  annotations: {}
+
+# Requires KC_METRICS_ENABLED. FRESH-BOOTSTRAP CAVEAT: the ServiceMonitor CRD
+# arrives with observability, after this component; set false on a brand-new
+# cluster until it exists.
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: ""
+
+gateway:
+  enabled: true
+  name: "traefik-gateway"
+  namespace: "traefik"
+  sectionName: "websecure"
+
+route:
+  annotations: {}
+  # The login endpoint is the credential-stuffing target. The Middleware must exist
+  # in THIS namespace; the traefik chart renders it here.
+  middlewares:
+    - auth-ratelimit
+  # No rewrite. KC_HTTP_RELATIVE_PATH means Keycloak itself serves under /keycloak,
+  # so the path must be passed through unchanged; stripping it 404s every request.
+  rewrite:
+    enabled: false
+    replacePrefixMatch: "/"
+
+# -- Probes -------------------------------------------------------------------
+# ALL THREE ENABLED. startupProbe is the important one: Keycloak's first boot runs
+# database migrations and joins the Infinispan cluster, which can take minutes;
+# without a startup probe the liveness probe fires during that window and restarts
+# the pod, forever.
+#
+# PORT AND PATH, both measured against the running pods:
+#   - Since Keycloak 25 health lives on the MANAGEMENT interface (9000). /health/*
+#     on 8080 is a 404, and a 404 fails a probe.
+#   - The management endpoints inherit KC_HTTP_RELATIVE_PATH, so the path carries
+#     the /keycloak prefix.
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /keycloak/health/started
+    port: management
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  # 30 x 10s = 5 minutes for migrations plus cluster join.
+  failureThreshold: 30
+  successThreshold: 1
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /keycloak/health/live
+    port: management
+  # Low, because the startupProbe already covers slow boot.
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    # /health/ready, not /health/live: ready reports database connectivity too, so
+    # a Keycloak that cannot reach Postgres leaves the Service instead of serving
+    # 500s.
+    path: /keycloak/health/ready
+    port: management
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1

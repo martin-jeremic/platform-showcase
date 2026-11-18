@@ -1,0 +1,235 @@
+# stages/build-stage.yml
+#
+# Company-services BUILD stage (the CI half of the CI/CD pair; promote-stage.yml is the CD half).
+# Builds every image ONCE, captures its immutable digest, publishes it as a `deploy-meta-<image>`
+# artifact (image.env: VERSION=..., DIGEST=...), and pushes the Helm chart to the registry (OCI).
+# It never touches a cluster and never writes to the GitOps repo: promotion is the CD's job.
+#
+# One stage serves both shapes:
+#   - one image, one chart (most services);
+#   - several images sharing ONE chart (the four HR frontends of one Nx workspace build four
+#     images and push the shared `hr-app` chart once). Every image is rebuilt on every release:
+#     the chart, nginx config, entrypoint and Dockerfile are shared, and an Nx `--affected` diff
+#     cannot see them, so a chart-only change used to build nothing and promote nothing.
+#
+# Gated on isReleaseReady by default: a run without a releasable commit publishes NOTHING (no
+# image, no chart, no deploy-meta), so the CD has nothing to download and fails loudly instead of
+# promoting a placeholder version.
+#
+# Docker here (unlike the product-a template, which uses `az acr build`): these agents run a
+# Docker daemon. BuildKit is used for secrets: the private npm feed's .npmrc is a secure file
+# mounted with `--secret id=npmrc`, so it never lands in a layer or in the image history. The
+# original Dockerfiles wrote a token into ~/.npmrc in a RUN step; that pattern is gone.
+#
+# Same split as build-or-promote-stage.yml: the long docker build runs in one AzureCLI task, the
+# digest lookup in another, so the 10-minute federated assertion is always fresh for `az`.
+
+parameters:
+  # Each entry: { name, dockerfile, buildContext } and optionally { buildArgs: { K: v } }.
+  # name == image repository == apps/<name>/ folder in gitops/services.
+  - name: images
+    type: object
+  - name: chartName
+    type: string
+  - name: chartDir
+    type: string
+  - name: acrName
+    type: string
+    default: orgacr
+  - name: armServiceConnection
+    type: string
+    default: arm-platform
+  # Secure file (Pipelines > Library) holding an .npmrc for a private feed; '' = none.
+  - name: npmrcSecureFile
+    type: string
+    default: ''
+  - name: requireReleaseReady
+    type: boolean
+    default: true
+  # Render the chart against the real GitOps values of every image/env before pushing it, so a
+  # value the chart now requires but GitOps lacks fails HERE, not as a ComparisonError in Argo
+  # after the promotion already happened. Needs `resources.repositories: - repository: gitops`.
+  - name: validateAgainstGitops
+    type: boolean
+    default: false
+  - name: gitopsRepoUrl
+    type: string
+    default: https://dev.azure.com/example-org/platform/_git/services-gitops
+  - name: gitopsEnvs
+    type: object
+    default: [dev, services]
+  - name: helmVersion
+    type: string
+    default: '4.2.0'
+  - name: dependsOn
+    type: object
+    default: [Versioning]
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: BuildAndPush
+    displayName: Build image(s) once + push chart
+    dependsOn: ${{ parameters.dependsOn }}
+    ${{ if parameters.requireReleaseReady }}:
+      condition: and(succeeded(), eq(dependencies.Versioning.outputs['SemanticVersioning.DetermineVersion.isReleaseReady'], 'true'))
+    variables:
+      # A runtime expression bound to a variable, read in scripts through env. Inlining
+      # ${{ parameters.x }} holding `$[ ... ]` into bash once made bash try arithmetic expansion.
+      imageVersion: $[ stageDependencies.Versioning.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+    jobs:
+      - ${{ each image in parameters.images }}:
+        - job: Build_${{ replace(image.name, '-', '_') }}
+          displayName: Build ${{ image.name }}
+          pool: ${{ parameters.pool }}
+          steps:
+            - checkout: self
+              fetchDepth: 1
+
+            - ${{ if ne(parameters.npmrcSecureFile, '') }}:
+              - task: DownloadSecureFile@1
+                name: npmrc
+                displayName: Download .npmrc (secure file)
+                inputs:
+                  secureFile: ${{ parameters.npmrcSecureFile }}
+
+            - task: AzureCLI@2
+              displayName: docker build + push ${{ image.name }}
+              env:
+                DOCKER_BUILDKIT: '1'
+                ACR_NAME: ${{ parameters.acrName }}
+                IMAGE: ${{ image.name }}
+                VERSION: $(imageVersion)
+                DOCKERFILE: ${{ image.dockerfile }}
+                BUILD_CONTEXT: ${{ coalesce(image.buildContext, '.') }}
+                ${{ if ne(parameters.npmrcSecureFile, '') }}:
+                  NPMRC_PATH: $(npmrc.secureFilePath)
+                BUILDARG_VERSION: $(imageVersion)
+                BUILDARG_REVISION: $(Build.SourceVersion)
+                ${{ each arg in image.buildArgs }}:
+                  BUILDARG_${{ arg.key }}: ${{ arg.value }}
+              inputs:
+                azureSubscription: ${{ parameters.armServiceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  set -euo pipefail
+                  [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]No version: the Versioning stage found no release."; exit 1; }
+                  REF="$ACR_NAME.azurecr.io/$IMAGE:$VERSION"
+                  ARGS=()
+                  for name in $(compgen -e); do
+                    case "$name" in BUILDARG_*) ARGS+=(--build-arg "${name#BUILDARG_}=${!name}") ;; esac
+                  done
+                  [ -z "${NPMRC_PATH:-}" ] || ARGS+=(--secret "id=npmrc,src=$NPMRC_PATH")
+                  az acr login --name "$ACR_NAME"
+                  docker build --pull -f "$DOCKERFILE" "${ARGS[@]}" -t "$REF" "$BUILD_CONTEXT"
+                  docker push "$REF"
+                  docker image rm "$REF" > /dev/null || true
+
+            - task: AzureCLI@2
+              displayName: Resolve digest + write deploy-meta (${{ image.name }})
+              env:
+                ACR_NAME: ${{ parameters.acrName }}
+                IMAGE: ${{ image.name }}
+                VERSION: $(imageVersion)
+              inputs:
+                azureSubscription: ${{ parameters.armServiceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  set -euo pipefail
+                  DIGEST="$(az acr repository show --name "$ACR_NAME" --image "$IMAGE:$VERSION" --query digest -o tsv)"
+                  [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "##vso[task.logissue type=error]Unexpected digest for $IMAGE:$VERSION: '$DIGEST'"; exit 1; }
+                  echo "Built $IMAGE:$VERSION @ $DIGEST"
+                  OUT="$BUILD_ARTIFACTSTAGINGDIRECTORY/deploy-meta"
+                  mkdir -p "$OUT"
+                  printf 'VERSION=%s\nDIGEST=%s\n' "$VERSION" "$DIGEST" > "$OUT/image.env"
+
+            - publish: $(Build.ArtifactStagingDirectory)/deploy-meta
+              artifact: deploy-meta-${{ image.name }}
+              displayName: Publish deploy-meta-${{ image.name }}
+
+      - job: Chart
+        displayName: Package + push chart ${{ parameters.chartName }}
+        dependsOn:
+          - ${{ each image in parameters.images }}:
+            - Build_${{ replace(image.name, '-', '_') }}
+        pool: ${{ parameters.pool }}
+        ${{ if parameters.validateAgainstGitops }}:
+          uses:
+            repositories:
+              - gitops
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: HelmInstaller@1
+            displayName: Install Helm ${{ parameters.helmVersion }}
+            inputs:
+              helmVersionToInstall: ${{ parameters.helmVersion }}
+
+          - bash: |
+              set -euo pipefail
+              OUT="$BUILD_ARTIFACTSTAGINGDIRECTORY/charts"
+              mkdir -p "$OUT"
+              helm lint "$CHART_DIR"
+              helm package "$CHART_DIR" --version "$VERSION" --app-version "$VERSION" --destination "$OUT"
+            displayName: Lint + package at $(imageVersion)
+            env:
+              CHART_DIR: ${{ parameters.chartDir }}
+              VERSION: $(imageVersion)
+
+          - ${{ if parameters.validateAgainstGitops }}:
+            - bash: |
+                set -euo pipefail
+                WORKDIR="$(mktemp -d)"
+                trap 'rm -rf "$WORKDIR"' EXIT
+                git -c http.extraheader="AUTHORIZATION: bearer $SYSTEM_ACCESSTOKEN" \
+                  clone --quiet --depth 1 "$GITOPS_URL" "$WORKDIR/gitops"
+                PKG="$BUILD_ARTIFACTSTAGINGDIRECTORY/charts/$CHART_NAME-$VERSION.tgz"
+                failed=0
+                for app in $APPS; do
+                  for env in $ENVS; do
+                    dir="$WORKDIR/gitops/apps/$app/$env"
+                    [ -f "$dir/values.yaml" ] || { echo "skip $app/$env (no values.yaml)"; continue; }
+                    args=(-f "$dir/values.yaml")
+                    [ ! -f "$dir/image.yaml" ] || args+=(-f "$dir/image.yaml")
+                    # Rendered exactly like the ApplicationSet renders it: values.yaml then
+                    # image.yaml, nothing overridden.
+                    if helm template "$app" "$PKG" "${args[@]}" > /dev/null; then
+                      echo "ok   $app/$env"
+                    else
+                      echo "##vso[task.logissue type=error]Chart $CHART_NAME $VERSION does not render with apps/$app/$env."
+                      failed=1
+                    fi
+                  done
+                done
+                exit "$failed"
+              displayName: Render against GitOps values
+              env:
+                SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                GITOPS_URL: ${{ parameters.gitopsRepoUrl }}
+                CHART_NAME: ${{ parameters.chartName }}
+                VERSION: $(imageVersion)
+                APPS: ${{ join(' ', parameters.images.*.name) }}
+                ENVS: ${{ join(' ', parameters.gitopsEnvs) }}
+
+          - task: AzureCLI@2
+            displayName: Push chart (OCI)
+            env:
+              ACR_NAME: ${{ parameters.acrName }}
+              CHART_NAME: ${{ parameters.chartName }}
+              VERSION: $(imageVersion)
+            inputs:
+              azureSubscription: ${{ parameters.armServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                REGISTRY="$ACR_NAME.azurecr.io"
+                az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv \
+                  | helm registry login "$REGISTRY" --username 00000000-0000-0000-0000-000000000000 --password-stdin
+                helm push "$BUILD_ARTIFACTSTAGINGDIRECTORY/charts/$CHART_NAME-$VERSION.tgz" "oci://$REGISTRY/helm"
+                helm registry logout "$REGISTRY" || true

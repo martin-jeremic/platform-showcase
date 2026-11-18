@@ -1,0 +1,10 @@
+# Env descriptor read by the `services` ApplicationSet. Its PRESENCE deploys access-app to services.
+# chart.version is written by the CD promotion; chart.name and destination are hand-seeded once.
+chart:
+  name: "access-app"
+  version: "2.0.3"
+# services = the registered spoke. `server` stays present and empty: missingkey=error.
+destination:
+  server: ""
+  name: "aks-org-prod"
+  namespace: access

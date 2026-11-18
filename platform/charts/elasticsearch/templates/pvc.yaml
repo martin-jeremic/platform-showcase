@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "elasticsearch.fullname" . }}
+  labels:
+    {{- include "elasticsearch.labels" . | nindent 4 }}
+  annotations:
+    # Indices are not regenerable. The Retain StorageClass keeps the PV and its
+    # Azure disk alive if this PVC is deleted; these two stop ArgoCD and Helm from
+    # being what deletes it (finding M9).
+    argocd.argoproj.io/sync-options: Prune=false
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+  {{- /* Always an explicit class. An empty storageClassName means "use the
+         cluster default", which here is reclaimPolicy: Delete — the exact trap
+         that put the demo broker one `kubectl delete pvc` away from total data
+         loss (finding M9/H5). Required, so a missing value fails the render. */}}
+  storageClassName: {{ required "persistence.storageClass is required — set it to platform-retain, never leave it empty" .Values.persistence.storageClass | quote }}

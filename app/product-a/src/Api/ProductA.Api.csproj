@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    Stub project. TargetFramework, Nullable, Deterministic and friends come from
+    ../../Directory.Build.props, so this file stays thin. No package references: the stub uses
+    only the ASP.NET Core shared framework (health checks, options validation, JSON console logging).
+  -->
+  <PropertyGroup>
+    <RootNamespace>ProductA.Api</RootNamespace>
+    <AssemblyName>ProductA.Api</AssemblyName>
+  </PropertyGroup>
+
+</Project>

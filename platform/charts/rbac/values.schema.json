@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "rbac values",
+  "type": "object",
+  "required": ["namespaces"],
+  "additionalProperties": true,
+  "properties": {
+    "namespaces": {
+      "type": "array",
+      "description": "One Namespace + one RoleBinding per entry.",
+      "items": {
+        "type": "object",
+        "required": ["name", "entraGroupId"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "maxLength": 63,
+            "description": "DNS-1123 label; the namespace to create and grant access in"
+          },
+          "create": {
+            "type": "boolean",
+            "description": "render the Namespace object itself; false when it already exists"
+          },
+          "entraGroupId": {
+            "type": "string",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$",
+            "description": "Entra group object ID (GUID) used as the RoleBinding subject. Empty passes the schema but is rejected at render time by templates/_helpers.tpl — see the chart README."
+          },
+          "entraGroupName": {
+            "type": "string",
+            "description": "display name, recorded as an annotation so bindings stay legible"
+          },
+          "role": {
+            "enum": ["view", "edit", "admin"],
+            "description": "built-in ClusterRole the RoleBinding references"
+          }
+        }
+      }
+    },
+    "protectNamespaces": {
+      "type": "boolean",
+      "description": "annotate Namespaces with Prune=false so removing an entry orphans rather than deletes them"
+    },
+    "namespaceLister": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "includeNodes": { "type": "boolean" }
+      }
+    },
+    "clusterBindings": {
+      "type": "array",
+      "description": "Optional cluster-wide read-only tiers. cluster-admin is not grantable here.",
+      "items": {
+        "type": "object",
+        "required": ["name", "clusterRole", "entraGroupId"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "clusterRole": { "enum": ["view", "edit", "admin"] },
+          "entraGroupId": {
+            "type": "string",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$"
+          },
+          "entraGroupName": { "type": "string" }
+        }
+      }
+    },
+    "commonLabels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+apiVersion: v2
+name: headlamp
+description: >-
+  Headlamp -- Kubernetes web UI -- behind Keycloak OIDC. Users act with THEIR OWN
+  identity: the API server validates the Keycloak token directly (structured
+  authentication config) and RBAC applies to the user's groups. Headlamp's own
+  ServiceAccount is bound to nothing.
+type: application
+version: 0.2.0
+# The Headlamp release; image.tag defaults to "v<appVersion>". Never `latest`.
+appVersion: "0.31.0"
+# 0.2.0 -- three fixes over the hand-written original:
+#   - the ServiceAccount was bound to cluster-admin, so anyone who reached the UI
+#     acted as cluster-admin whenever a request carried no user token. It is now
+#     bound to nothing, and per-group bindings refuse cluster-admin.
+#   - image and appVersion were `latest` -> an exact release.
+#   - the OIDC client secret came from a Secret this chart rendered from values and
+#     was passed on argv; it now comes from a pre-created Secret through Headlamp's
+#     HEADLAMP_CONFIG_* environment variables.

@@ -1,0 +1,37 @@
+{{- /*
+Prometheus scrape of the rabbitmq_prometheus plugin.
+
+The endpoint names the `prometheus` Service port, which only the main Service
+carries -- the headless Service selects the same pod but publishes no port of
+that name, so it contributes no duplicate targets.
+
+THE JOB LABEL IS PINNED (metrics.serviceMonitor.jobName), not left to the
+operator default (the Service name). The alert rules select job="rabbitmq", and a
+cluster that ADOPTED a legacy release in place keeps that release's Service name:
+on one demo cluster the default job was the legacy name, so every RabbitMQ alert
+matched nothing -- and a wrong job= never fires and never errors. Agent spokes
+scrape the same broker through Alloy with the same job name
+(cluster-monitoring-agent metrics.rabbitmq.jobName), so one rule set covers both.
+*/ -}}
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "rabbitmq.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "rabbitmq.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: prometheus
+      path: /metrics
+      {{- with .Values.metrics.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+      relabelings:
+        - targetLabel: job
+          replacement: {{ required "metrics.serviceMonitor.jobName is required: the alert rules select on it" .Values.metrics.serviceMonitor.jobName | quote }}
+{{- end }}

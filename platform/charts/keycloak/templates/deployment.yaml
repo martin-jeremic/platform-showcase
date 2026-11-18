@@ -1,0 +1,214 @@
+{{- $azureKeyVault := .Values.azureKeyVault | default dict -}}
+{{- $kvEnabled := $azureKeyVault.enabled | default false -}}
+{{- $kvSecrets := $azureKeyVault.secrets | default list -}}
+{{- $reloader := .Values.reloader | default dict -}}
+{{- $authMode := $azureKeyVault.authMode | default "workloadIdentity" -}}
+{{- $workloadIdentity := and $kvEnabled (eq $authMode "workloadIdentity") -}}
+{{- /* Only servicePrincipal needs a static credential Secret. workloadIdentity and
+       vmManagedIdentity both authenticate without one, and passing nodePublishSecretRef
+       anyway makes the driver prefer the static credential and silently ignore the
+       identity — so this must NOT be `not $workloadIdentity`. */ -}}
+{{- $staticCredential := and $kvEnabled (eq $authMode "servicePrincipal") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "keycloak.fullname" . }}
+  labels:
+    {{- include "keycloak.labels" . | nindent 4 }}
+  {{- if or ($reloader.enabled | default false) .Values.deploymentAnnotations }}
+  annotations:
+    {{- if $reloader.enabled | default false }}
+    # Stakater Reloader. Load-bearing for Key Vault rotation: the CSI driver
+    # updates the synced Secret in place, but env vars injected via secretKeyRef
+    # are fixed for the life of the container — without a restart the pod keeps
+    # using the OLD password until it happens to be recreated.
+    #
+    # `auto` watches every ConfigMap and Secret this Deployment references
+    # (envFrom the -config ConfigMap, env from the KV-synced Secret, and the CSI
+    # volume), so plain config edits trigger a rollout too. Set
+    # reloader.mode=targeted to watch only the KV-synced Secret by name.
+    {{- if eq ($reloader.mode | default "auto") "targeted" }}
+    {{- if $kvEnabled }}
+    secret.reloader.stakater.com/reload: {{ $azureKeyVault.syncedSecretName | quote }}
+    configmap.reloader.stakater.com/reload: {{ printf "%s-config" (include "keycloak.fullname" .) | quote }}
+    {{- end }}
+    {{- else }}
+    reloader.stakater.com/auto: "true"
+    {{- end }}
+    {{- end }}
+    {{- with .Values.deploymentAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "keycloak.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "keycloak.selectorLabels" . | nindent 8 }}
+        {{- if $workloadIdentity }}
+        # Tells the Azure Workload Identity webhook to project an AAD token into
+        # this pod. Without it the CSI driver's clientID has no token to exchange.
+        azure.workload.identity/use: "true"
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # Previously unset, so the pod ran as the `default` ServiceAccount and the
+      # ServiceAccount this chart creates went unused. Mandatory for workload
+      # identity, which federates on system:serviceaccount:<ns>:<sa>.
+      serviceAccountName: {{ include "keycloak.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
+          {{- /* No silent fallback to .Chart.AppVersion. appVersion tracks the KEYCLOAK
+                 version (26.x) while image tags are this repo's SemVer build numbers
+                 (3.x) — two unrelated version lines. Defaulting to it produced a
+                 plausible-looking tag that cannot exist in ACR, turning a config gap
+                 into a runtime ImagePullBackOff. Fail at render time instead. */}}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | required "set image.digest (preferred) or image.tag — CI writes both into apps/<svc>/<env>/image.yaml; appVersion is NOT a valid image tag" }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.keycloak.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # ALL non-secret config, in both auth modes — one source, no duplication.
+          envFrom:
+            - configMapRef:
+                name: {{ include "keycloak.fullname" . }}-config
+          # Only the PASSWORDS differ between modes:
+          #   KV  -> the Secret the CSI driver syncs (azureKeyVault.secrets)
+          #   else-> an out-of-band Secret (existingSecret), never templated here
+          env:
+            {{- if $kvEnabled }}
+            {{- range $kvSecrets }}
+            {{- if .env }}
+            - name: {{ .env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $azureKeyVault.syncedSecretName }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+            {{- else }}
+            {{- $existing := .Values.existingSecret | default dict }}
+            {{- range $existing.secrets | default list }}
+            - name: {{ .env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $existing.name | required "existingSecret.name is required when azureKeyVault.enabled=false" }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.keycloak.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if $kvEnabled }}
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Keycloak 26 management interface: /keycloak/health/* (probes) and
+            # /keycloak/metrics (KC_METRICS_ENABLED). Keycloak listens on it
+            # whether or not it is declared here -- declaring it is what lets the
+            # probes and the Service reference it BY NAME instead of by the
+            # number 9000, which is how the prod overlay had to write it.
+            - name: management
+              containerPort: {{ .Values.service.managementPort }}
+              protocol: TCP
+            {{- if .Values.clustering.enabled }}
+            # jgroups. Infinispan replicates the session cache over this port, and
+            # DNS_PING discovers peers through the headless Service that selects it.
+            # Without this port declared the headless Service has no endpoint to
+            # publish, DNS_PING resolves nothing, and each replica forms its own
+            # one-member cluster -- which looks healthy and logs no error, while
+            # every login is only valid on whichever pod served it.
+            - name: jgroups
+              containerPort: {{ .Values.clustering.port }}
+              protocol: TCP
+            {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- omit .Values.startupProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- omit .Values.livenessProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            {{- omit .Values.readinessProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range . }}
+        {{- /*
+          labelSelector is DERIVED, never taken from values. A spread constraint
+          whose selector misses its own pods matches nothing, so skew is always 0
+          and the constraint is vacuously satisfied while looking correct -- it
+          fails open and silently. Deriving it from keycloak.selectorLabels, the
+          same helper that stamps the pod template labels, makes that divergence
+          impossible. Any labelSelector supplied in values is omitted on purpose.
+        */}}
+        {{- $constraint := omit . "labelSelector" }}
+        {{- $_ := set $constraint "labelSelector" (dict "matchLabels" (include "keycloak.selectorLabels" $ | fromYaml)) }}
+        - {{- toYaml $constraint | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $kvEnabled }}
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ $azureKeyVault.secretProviderClassName }}
+            {{- if $staticCredential }}
+            # servicePrincipal mode ONLY: the driver authenticates to Key Vault with
+            # the clientid/clientsecret in this Secret, which must exist in the release
+            # namespace before the pod starts (seeded from the gitops setup/ folder).
+            # OMITTED under workloadIdentity and vmManagedIdentity — passing this as
+            # well makes the driver prefer the static credential and silently ignore
+            # the managed identity.
+            nodePublishSecretRef:
+              name: {{ $azureKeyVault.credentialsSecretName | required "azureKeyVault.credentialsSecretName is required when authMode=servicePrincipal" }}
+            {{- end }}
+      {{- end }}

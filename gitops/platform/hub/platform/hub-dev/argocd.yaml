@@ -1,0 +1,10 @@
+# Platform descriptor -- its PRESENCE deploys 'argocd' to 'hub-dev'.
+# ADOPTS the live push-Helm release: the Argo CD reading this file. selfManaged
+# drops the automated sync policy from this one Application -- a change to the
+# chart shows OutOfSync until someone has reviewed the diff and pressed Sync.
+chartPath:     argocd
+chartRevision: argocd-1.3.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   argocd
+namespace:     argocd-hub
+syncWave:      "2"
+selfManaged:   true   # manual sync only -- see the appset's templatePatch

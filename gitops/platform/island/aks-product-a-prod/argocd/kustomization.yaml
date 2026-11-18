@@ -1,0 +1,20 @@
+# Root app-of-apps render target. Argo CD renders ONLY the resources listed here.
+#
+# EVERYTHING NOT LISTED IS DELIBERATELY UNMANAGED, and that is load-bearing:
+#   root-application.yaml  applied once by hand. If Argo managed the object that
+#                          defines it, a bad sync could delete its own root.
+#   setup/                 one-time bootstrap: the repository credential and the
+#                          secrets that cannot come from Key Vault over CSI. If they
+#                          were listed, `prune` would delete the credential Argo needs
+#                          to read this repo -- and it could not recover, because
+#                          recovering requires reading the repo.
+#
+# Adding a file under setup/ to this list is not a small mistake. CI fails on it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - projects/product-a-platform.yaml
+  - appsets/platform-aks-product-a-prod.yaml
+  # Standalone Applications that do not fit the platform appset's Helm-shaped
+  # template.
+  - applications/grafana-dashboards.yaml

@@ -1,0 +1,116 @@
+{{/*
+  Notification bodies: Teams card and Graph mail. ALERTMANAGER template syntax --
+  this file is shipped raw (templates/alertmanager-config.yaml, .Files.Get, no
+  tpl), so nothing here is evaluated by Helm.
+
+  Ported from the product lineage of this chart (where these lived in
+  kube-prometheus-stack templateFiles), with:
+    - NO grafanaBase fallback define. platform.grafanaBase, platform.lokiUid and
+      platform.alertmanagerDatasource are defined ONCE, in platform-derived.tmpl,
+      which the chart derives from grafana.ini root_url and the datasource
+      definitions. One definition each, so *.tmpl load order does not matter.
+      (It used to: the product lineage shipped a deliberately invalid fallback,
+      https://grafana.invalid, and each cluster overrode it from a second file.
+      Alertmanager parses the glob in lexical order and the LATER define of a
+      name wins, so the files carried -10- / -90- prefixes; naming them after
+      their content instead silently inverted the order and linked every
+      notification at grafana.invalid. Deriving the value removes the trap.);
+    - the cluster in the subject and the links -- a hub's channel and inbox
+      carry several clusters' alerts;
+    - the Teams card shows cluster / namespace / pod / name only, and no
+      backticks (Adaptive Card markdown has no code spans; they render as text);
+    - the Logs link filters on pod when present, and is omitted for Argo CD app
+      alerts (they carry dest_namespace): those fire on the hub, but the broken
+      workload's logs live in the destination cluster's Loki.
+
+  Verify the Silence and Explore URLs by CLICKING them on a real notification:
+  Grafana's ?panes= and /alerting/silence/new shapes change between majors, and
+  a wrong one renders a blank page, not an error.
+*/}}
+
+{{ define "platform.severity" }}{{ if .CommonLabels.severity }}{{ .CommonLabels.severity | toUpper }}{{ else }}UNSET{{ end }}{{ end }}
+
+{{/*
+  FIRING:2 · CRITICAL · PlatformArgoCDControllerDown @ hub-dev (argocd-hub)
+
+  Starts with the status WORD, never with '['. The Graph mail sends this as a webhook
+  payload string, and Alertmanager YAML-decodes every rendered payload string and
+  sends the decoded value whenever it is not a string (template.DeepCopyWithTemplate,
+  0.34.1). gopkg.in/yaml.v2 reads "[FIRING:2] CRITICAL ..." as the list [FIRING:2]
+  and drops the rest without an error, so Graph got "subject": ["FIRING:2"] and
+  answered 400 RequestBodyRead ('StartArray' where a 'PrimitiveValue' was expected).
+  Keep it starting with a letter and free of ": " (that would decode to a map).
+  cluster and namespace are Kubernetes names, and no alert name in use ends in a
+  colon, so neither can introduce one.
+*/}}
+{{ define "platform.subject" }}{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }} · {{ template "platform.severity" . }} · {{ .CommonLabels.alertname }}{{ if .CommonLabels.cluster }} @ {{ .CommonLabels.cluster }}{{ end }}{{ if .CommonLabels.namespace }} ({{ .CommonLabels.namespace }}){{ end }}{{ end }}
+
+{{/*
+  Grafana Explore on Loki, for ONE alert (use inside range). The pane JSON is
+  url-encoded in pieces: platform.lokiUid is a template and cannot be piped
+  into urlquery, so it is spliced between encoded segments (the chart only
+  derives a URL-safe uid, so it needs no encoding of its own).
+*/}}
+{{ define "platform.logsUrl" }}
+{{- $sel := printf `namespace=\"%s\"` .Labels.namespace -}}
+{{- if .Labels.cluster }}{{ $sel = printf `cluster=\"%s\",%s` .Labels.cluster $sel }}{{ end -}}
+{{- if .Labels.pod }}{{ $sel = printf `%s,pod=\"%s\"` $sel .Labels.pod }}{{ end -}}
+{{ template "platform.grafanaBase" . }}/explore?schemaVersion=1&orgId=1&panes={{ `{"a":{"datasource":"` | urlquery }}{{ template "platform.lokiUid" . }}{{ `","queries":[{"refId":"A","datasource":{"type":"loki","uid":"` | urlquery }}{{ template "platform.lokiUid" . }}{{ printf `"},"expr":"{%s}"}],"range":{"from":"now-1h","to":"now"}}}` $sel | urlquery }}
+{{- end }}
+
+{{/*
+  Silence through Grafana's Alertmanager datasource: Alertmanager itself is not
+  exposed, so Grafana is the only authenticated place a silence can be made.
+  ONE alert (use inside range).
+*/}}
+{{ define "platform.silenceUrl" }}{{ template "platform.grafanaBase" . }}/alerting/silence/new?alertmanager={{ template "platform.alertmanagerDatasource" . }}&matcher=alertname%3D{{ .Labels.alertname | urlquery }}{{ if .Labels.cluster }}&matcher=cluster%3D{{ .Labels.cluster | urlquery }}{{ end }}{{ if .Labels.namespace }}&matcher=namespace%3D{{ .Labels.namespace | urlquery }}{{ end }}{{ end }}
+
+{{/* ONE alert (use inside range). */}}
+{{ define "platform.links" }}[Silence]({{ template "platform.silenceUrl" . }}){{ if and .Labels.namespace (not .Labels.dest_namespace) }} · [Logs]({{ template "platform.logsUrl" . }}){{ end }}{{ if .Annotations.runbook_url }} · [Runbook]({{ .Annotations.runbook_url }}){{ end }}{{ end }}
+
+{{/* Where an alert is: the four labels worth reading on a phone. ONE alert. */}}
+{{ define "platform.where" }}{{ if .Labels.cluster }}cluster {{ .Labels.cluster }}{{ end }}{{ if .Labels.namespace }} · namespace {{ .Labels.namespace }}{{ end }}{{ if .Labels.pod }} · pod {{ .Labels.pod }}{{ end }}{{ if .Labels.name }} · name {{ .Labels.name }}{{ end }}{{ end }}
+
+{{/* ---- MS Teams (msteamsv2 -> Adaptive Card) ---------------------------------
+  Body is Adaptive Card MARKDOWN, not HTML: **bold**, [text](url), and a BLANK
+  LINE for a paragraph break. HTML tags render as literal text.
+*/}}
+{{ define "platform.teams.title" }}{{ template "platform.subject" . }}{{ end }}
+
+{{ define "platform.teams.text" }}
+{{- range .Alerts }}
+**{{ .Status | toUpper }} · {{ if .Labels.severity }}{{ .Labels.severity | toUpper }}{{ else }}UNSET{{ end }} · {{ .Labels.alertname }}**
+
+**{{ .Annotations.summary }}**
+
+{{ .Annotations.description }}
+
+{{ template "platform.where" . }}
+
+{{ template "platform.links" . }}
+
+{{ end }}
+{{- end }}
+
+{{/* ---- Email (Graph /sendMail payload) --------------------------------------- */}}
+{{ define "platform.email.subject" }}{{ template "platform.subject" . }}{{ end }}
+
+{{ define "platform.email.html" }}
+<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1f2328">
+<p style="margin:0 0 16px"><strong>{{ template "platform.subject" . }}</strong></p>
+{{ range .Alerts }}
+<div style="border-left:4px solid {{ if eq .Status "resolved" }}#1a7f37{{ else if eq .Labels.severity "critical" }}#cf222e{{ else }}#9a6700{{ end }};padding:8px 0 8px 12px;margin:0 0 16px">
+  <p style="margin:0 0 6px"><strong>{{ .Status | toUpper }} &middot; {{ .Annotations.summary }}</strong></p>
+  <p style="margin:0 0 10px">{{ .Annotations.description }}</p>
+  <p style="margin:0 0 10px;color:#656d76;font-size:12px">
+    {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }}&nbsp;&nbsp;{{ end }}
+  </p>
+  <p style="margin:0">
+    <a href="{{ template "platform.silenceUrl" . }}">Silence</a>
+    {{ if and .Labels.namespace (not .Labels.dest_namespace) }}&middot; <a href="{{ template "platform.logsUrl" . }}">Logs</a>{{ end }}
+    {{ if .Annotations.runbook_url }}&middot; <a href="{{ .Annotations.runbook_url }}">Runbook</a>{{ end }}
+  </p>
+</div>
+{{ end }}
+</body></html>
+{{ end }}

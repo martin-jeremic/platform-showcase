@@ -1,0 +1,43 @@
+# Cluster liveness -- a cluster that stopped reporting. HUB ONLY: the hub-dev
+# Prometheus holds every spoke's series (observability-ingest remote-writes them
+# in, stamped with their own `cluster`), so it is the one place "cluster X went
+# silent" can be observed. Gated by prometheusRules.files.spokes; on a standalone
+# cluster it could only ever name that cluster itself.
+#
+# RAW Prometheus rule-group file, see rules/workload.yaml for how it is loaded.
+#
+# Shape: `max_over_time(x[7d]) unless x`, aggregated by cluster. A cluster that
+# had kube-state-metrics samples at any point in the last 7 days but has none now
+# (its last sample is older than Prometheus' 5m staleness window) fires; a cluster
+# decommissioned on purpose stops firing by itself after 7 days. absent() cannot
+# express this without the cluster name written into the rule, one rule per
+# spoke. The `by (cluster)` is load-bearing: the hub scrapes its own
+# kube-state-metrics by pod IP, so an un-aggregated `unless` would fire for every
+# old `instance` for 7 days after each restart of that pod.
+#
+# kube-state-metrics is the probe because every cluster -- hub, agent spoke,
+# standalone -- scrapes exactly one, as job="kube-state-metrics".
+#
+# When this fires for a spoke, every other alert for that spoke is blind: the
+# kube-state-metrics / cAdvisor rules see no series, not failures.
+groups:
+  - name: platform.spokes
+    rules:
+      - alert: PlatformClusterSilent
+        expr: |
+          max by (cluster) (max_over_time(up{job="kube-state-metrics"}[7d]))
+          unless
+          max by (cluster) (up{job="kube-state-metrics"})
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.cluster }} stopped reporting"
+          description: >-
+            No kube-state-metrics sample from {{ $labels.cluster }} for 10m, after
+            it reported within the last 7 days. Every alert for that cluster is
+            blind until this resolves. On an agent spoke check the
+            cluster-monitoring-agent-alloy DaemonSet there and its export errors
+            (TLS = the client cert or the hub CA in its /etc/alloy/tls mount); on
+            the hub check observability-ingest-alloy. Resolves by itself 7 days
+            after a planned decommission.

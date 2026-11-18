@@ -1,0 +1,12 @@
+# Env descriptor read by the `services` ApplicationSet. Its PRESENCE deploys hr-portal to dev.
+# chart.version is written by the CD promotion; chart.name and destination are hand-seeded once.
+# chart.name is hr-app, shared by all four HR frontends; the Argo Application and the
+# Helm release are named after this folder.
+chart:
+  name: "hr-app"
+  version: "1.0.6"
+# dev = the hub itself, addressed in-cluster. `name` stays present and empty: missingkey=error.
+destination:
+  server: "https://kubernetes.default.svc"
+  name: ""
+  namespace: hr

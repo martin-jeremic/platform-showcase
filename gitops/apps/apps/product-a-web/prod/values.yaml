@@ -1,0 +1,96 @@
+# Prod env config for product-a-web (Angular SPA served by nginx), cluster aks-product-a-prod (island, in-cluster Argo CD).
+# A browser app holds no secrets, so there is no Key Vault and no workload identity here.
+# The image digest comes from prod/image.yaml (listed after this file in the Application).
+#
+# Every key the chart reads per environment is STATED here, never inherited from a chart default
+# (scripts/check-configmaps.py enforces it).
+
+# No pull secret: the kubelet identity holds AcrPull on the registry. A dangling reference only
+# produced FailedToRetrieveImagePullSecret warnings on every pod.
+imagePullSecrets: []
+
+image:
+  pullPolicy: IfNotPresent
+
+# ── Routing (Gateway API) ────────────────────────────────────────────────────────────────────
+# sectionName pins the route to the TLS listener. Without it the route also binds the plain-HTTP
+# listener and the service answers on :80. Listener hostnames match EXACTLY: a route on any other
+# host cannot attach, and Argo still shows Synced/Healthy while it reports NoMatchingParent.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+
+route:
+  enabled: true
+  hostnames:
+    - app.product-a.example.net
+  path: /
+  rewrite:
+    enabled: false
+    replacePrefixMatch: /
+  # No `tls:` block. TLS terminates on the Gateway's websecure listener; the chart never read
+  # route.tls, so the secret name the first prod values carried guaranteed nothing.
+
+# ── Scaling, health, placement (owned per env) ───────────────────────────────────────────────
+replicaCount: 2
+
+# While enabled is false the Deployment uses replicaCount. Turning it on makes replicaCount inert:
+# the HPA owns the replica count from then on.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 2
+  targetCPUUtilizationPercentage: 75
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# startupProbe: failureThreshold x periodSeconds is the boot budget before the kubelet kills the
+# pod. readinessProbe gates Service endpoints. livenessProbe RESTARTS the container, so it stays
+# off unless the service can genuinely wedge.
+startupProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 5
+  failureThreshold: 30
+readinessProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 10
+  failureThreshold: 3
+livenessProbe:
+  enabled: false
+  path: /healthz
+  periodSeconds: 30
+  failureThreshold: 3
+
+nodeSelector: { agentpool: workload }
+tolerations: []
+# Two replicas: prefer different nodes so one node drain never takes both.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: product-a-web
+
+# ── Runtime configuration ───────────────────────────────────────────────────────────────────
+# The image is environment-agnostic: the container entrypoint writes these values to
+# /usr/share/nginx/html/env.js at start, and index.html loads it before the bundle. One image
+# runs in every environment; rebuilding per environment would break "promote by digest".
+config:
+  environment: "Production"
+  apiBaseUrl: "https://app.product-a.example.net/api"
+  oidcAuthority: "https://app.product-a.example.net/keycloak/realms/product-a"
+  oidcClientId: "product-a-web"
+  oidcScope: "openid profile email"

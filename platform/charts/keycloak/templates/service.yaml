@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "keycloak.fullname" . }}
+  labels:
+    {{- include "keycloak.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    # No https port. The forked Service published 443 -> 8443 although
+    # KC_HTTPS_ENABLED is false and nothing listens there: an endpoint that
+    # accepts connections and resets them is worse than no endpoint.
+
+    # Management interface. Published so the ServiceMonitor has a named port to
+    # scrape; the Gateway routes only to `http`, so this stays cluster-internal.
+    - port: {{ .Values.service.managementPort }}
+      targetPort: management
+      protocol: TCP
+      name: management
+  selector:
+    {{- include "keycloak.selectorLabels" . | nindent 4 }}

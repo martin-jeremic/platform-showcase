@@ -1,0 +1,8 @@
+# Platform descriptor -- its PRESENCE deploys 'cert-manager' to 'hub-dev'.
+# The MicroK8s add-on was adopted in place under release name `cert-manager` (the
+# catalog default) -- only that name renders the add-on's immutable selectors.
+chartPath:     cert-manager
+chartRevision: cert-manager-1.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   cert-manager
+namespace:     cert-manager
+syncWave:      "1"

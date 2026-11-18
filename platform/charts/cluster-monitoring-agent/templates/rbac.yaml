@@ -1,0 +1,44 @@
+{{- if .Values.alloy.enabled }}
+# Broad read-only ClusterRole for the Alloy ServiceAccount:
+#   - nodes/proxy : scrape kubelet + cAdvisor via the API server proxy
+#   - pods/log    : read container logs (loki.source.kubernetes)
+#   - pods/services/endpoints/namespaces/nodes : kubernetes discovery
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-monitoring-agent
+  labels:
+    {{- include "cluster-monitoring-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+      - pods/log
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-monitoring-agent
+  labels:
+    {{- include "cluster-monitoring-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.alloy.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

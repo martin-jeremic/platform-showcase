@@ -1,0 +1,40 @@
+cluster-test ({{ .Chart.Name }}-{{ .Chart.Version }}) installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Cluster label on the page : {{ .Values.clusterName }}
+Replicas                  : {{ .Values.replicaCount }}
+Welcome page path         : {{ .Values.welcomePath }}
+
+1) Pods up (each renders its own identity):
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "cluster-test.fullname" . }}
+   kubectl -n {{ .Release.Namespace }} get pods -o wide
+
+{{- if .Values.httpRoute.enabled }}
+
+2) Reachable through the gateway at:
+{{- range .Values.httpRoute.hostnames }}
+     https://{{ . }}{{ $.Values.welcomePath }}
+{{- else }}
+     (!) httpRoute.enabled is true but httpRoute.hostnames is empty — set a host
+         the gateway certificate covers, or the route matches nothing.
+{{- end }}
+
+   The route attaches to Gateway {{ .Values.httpRoute.gateway.namespace }}/{{ .Values.httpRoute.gateway.name }}
+   (listener {{ .Values.httpRoute.gateway.sectionName }}). Confirm it was accepted:
+     kubectl -n {{ .Release.Namespace }} get httproute {{ include "cluster-test.fullname" . }} \
+       -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'
+
+   Requires: DNS for the host -> gateway LB IP, and the host in the gateway cert.
+{{- else }}
+
+2) No HTTPRoute was created (httpRoute.enabled=false). Test in-cluster:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "cluster-test.fullname" . }} 8080:{{ .Values.service.port }}
+     # then open http://localhost:8080{{ .Values.welcomePath }}
+   To expose it via the shared Traefik gateway, enable httpRoute in your values.
+{{- end }}
+
+3) Watch it balance across pods/nodes (repeat and diff the Pod/Node lines):
+{{- if and .Values.httpRoute.enabled .Values.httpRoute.hostnames }}
+     for i in 1 2 3 4; do curl -sk https://{{ index .Values.httpRoute.hostnames 0 }}{{ .Values.welcomePath }} | grep -Eo 'Pod</dt><dd>[^<]+'; done
+{{- else }}
+     curl -s http://localhost:8080{{ .Values.welcomePath }} | grep -Eo 'Pod</dt><dd>[^<]+'
+{{- end }}

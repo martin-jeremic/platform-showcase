@@ -1,0 +1,38 @@
+<Project>
+
+  <!--
+    Central package versions. Projects reference packages by name only. Every entry here must also
+    be allowed by the licence allow-list the CI licence scan reads; the two files are checked
+    against each other. A trimmed excerpt of the real file.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup Label="Analysers">
+    <PackageVersion Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="4.14.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Web">
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <!-- Pinned above the version that arrives transitively, which carried a published advisory.
+         Transitive pinning (Directory.Build.props) makes this entry win everywhere. It was caught
+         by warnings-as-errors: NuGet's audit warning NU1903 failed the build. -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Persistence: schema per tenant over PostgreSQL">
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.0" />
+    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.0" />
+    <!-- Architecture tests: the layering rule (domain and platform never reference agents). -->
+    <PackageVersion Include="NetArchTest.Rules" Version="1.3.2" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,17 @@
+# observability-log-rules -- LogQL alert rules for ONE Loki tenant.
+#
+# This file names NO environment. The one fact per release, `tenant`, comes from
+# platform/values/<cluster>/log-rules-<tenant>.yaml in the gitops repo.
+#
+# The Loki tenant (X-Scope-OrgID) the rules evaluate in. On every cluster a tenant
+# is named after the cluster its logs come from (observability-ingest's
+# stage.tenant reads the `cluster` label; the observability chart's
+# alloyPipeline.tenant equals alloyPipeline.cluster), so the alerts' `cluster`
+# label -- which Alertmanager routes audiences by -- is the tenant too.
+tenant: ""
+
+# Rule files about one particular service: off unless this tenant runs it.
+# (log-rules/exceptions.yaml and log-rules/http.yaml apply to every tenant.)
+rules:
+  # log-rules/ingest-rate.yaml -- inbound message rate of product-a-module.
+  ingestRate: false

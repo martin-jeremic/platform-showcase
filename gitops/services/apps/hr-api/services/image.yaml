@@ -1,0 +1,5 @@
+# Managed by CD (gitops-promote-steps.yml), from apps/hr-api/dev/image.yaml (exact dev digest).
+# Do not edit by hand. The digest overrides the tag.
+image:
+  tag: "0.12.1"
+  digest: "sha256:a5d3cbd764fad925af28712c57ff1058dabf893ad234d513fd09e5ecebe3649d"

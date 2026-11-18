@@ -1,0 +1,36 @@
+{{- /*
+Prometheus scrape of the Keycloak 26 management interface.
+
+The endpoint names the `management` Service port, which exists only on the main
+Service -- the headless jgroups Service selects the same pods but publishes no
+port of that name, so it contributes no duplicate targets.
+
+jobLabel is deliberately left unset: the job label then becomes the Service name,
+keycloak, which is what the Identity dashboards' job=~".*keycloak.*"
+filters match. honorLabels is likewise left false, so the Kubernetes namespace
+and pod labels stay authoritative over anything the exporter emits.
+
+The path is derived from KC_HTTP_RELATIVE_PATH rather than hardcoded, the same
+way the ConfigMap derives KC_HOSTNAME: the management endpoints inherit that
+prefix, so a change to it must not be able to leave the scrape path behind.
+*/ -}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- $relativePath := (get ((.Values.config | default dict).options | default dict) "KC_HTTP_RELATIVE_PATH") | default "" }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "keycloak.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "keycloak.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "keycloak.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: management
+      path: {{ printf "%s/metrics" (trimSuffix "/" $relativePath) | quote }}
+      {{- with .Values.metrics.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+{{- end }}

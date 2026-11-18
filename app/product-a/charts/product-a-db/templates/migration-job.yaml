@@ -1,0 +1,137 @@
+{{- /*
+Schema migration / verification Job. A PLAIN Job, not a Helm hook and not an Argo PreSync hook,
+owned by its own release / Argo Application, separate from product-a-api.
+
+WHAT THE SPLIT GIVES UP, AND WHAT REPLACES IT
+  As a pre-upgrade hook on the API chart, a failing migration failed the whole release: the
+  Deployment never rolled and the old pods kept serving the old schema. As a separate Application
+  that interlock is GONE: the API Application can roll new code while this one is Degraded.
+  What stands in for it:
+    (a) a migration lint in the API's test suite that enforces expand/contract (additive,
+        forward-only migrations), so an OLDER image always runs against whatever this Job has
+        already applied;
+    (b) on the push-based dev environment only, pipeline ordering: the migration stage must
+        complete (helm --wait --wait-for-jobs) before the deploy stage starts.
+  Say this to whoever enables the Job on a new environment: the interlock is the lint.
+
+WHY NOT A HOOK
+  A hook is bound to its release's lifecycle events, which is exactly the coupling the split
+  removes; and a hook that fails blocks every unrelated change to that release.
+
+NAMING: <fullname>-migrate-<first 12 hex of the digest>-<runNonce>
+  Job specs are immutable. Same digest + same nonce => the Job exists and is Complete => the apply
+  is a no-op. A new digest or a bumped nonce => a new name => a new Job. There is no other "run it
+  again" button: an Argo sync of an in-sync Application does nothing.
+
+NO ttlSecondsAfterFinished, AND selfHeal: false ON THIS APPLICATION
+  A TTL would delete the Complete Job; with selfHeal the next drift-triggered sync would see it
+  "missing" and recreate it under the SAME name, so the DDL would run again, periodically, forever.
+  A Failed Job is therefore not retried automatically either: an operator deletes it or bumps the
+  nonce after fixing the cause. Deliberate.
+
+A COMPLETE JOB IS NOT A HEALTHY DATABASE
+  It asserts "this digest ran once". After a restore from a dump the Application stays green while
+  that is no longer true. Whether the database is in order is a query against the migration
+  history tables, never `kubectl get job` or an Argo colour.
+
+ARGS ONLY, NO `command:`
+  The image's ENTRYPOINT (`dotnet ProductA.Api.dll`) runs unwrapped with the verb as its argument.
+  The chiseled image has no shell, and that turned out to be a feature: an earlier
+  `sh -c 'export DATABASE="$(cat /mnt/secrets-store/...)"; ...'` wrapper started the app with an
+  EMPTY database setting when the CSI driver had delivered no file, because `export` returns 0 even
+  when the command substitution inside it fails, which defeats `set -e`. The app then reported a
+  misleading configuration error instead of the failed read. DATABASE now comes from secretKeyRef
+  like every other workload; kubelet retries (CreateContainerConfigError) until the driver has
+  synced the Secret, which does not consume backoffLimit, and activeDeadlineSeconds still bounds it.
+*/ -}}
+{{- if .Values.migrationJob.enabled }}
+{{- $mode := .Values.migrationJob.mode | toString }}
+{{- if not (has $mode (list "verify" "migrate" "seed")) }}
+{{- fail (printf "migrationJob.mode must be one of verify|migrate|seed, got %q" $mode) }}
+{{- end }}
+{{- $digest := include "product-a-db.digest" . }}
+{{- $nonce := .Values.migrationJob.runNonce | toString }}
+{{- $name := printf "%s-migrate-%s-%s" (include "product-a-db.fullname" .) ($digest | trimPrefix "sha256:" | trunc 12) $nonce | trunc 63 | trimSuffix "-" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "product-a-db.labels" . | nindent 4 }}
+    example.com/job-kind: schema-migration
+  annotations:
+    example.com/image-digest: {{ $digest | quote }}
+    # The dev pipeline selects THIS run's Job by this annotation to print its logs.
+    example.com/run-nonce: {{ $nonce | quote }}
+spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrationJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "product-a-db.labels" . | nindent 8 }}
+        example.com/job-kind: schema-migration
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "product-a-db.fullname" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ printf "%s@%s" .Values.image.repository $digest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - {{ printf "--%s" $mode | quote }}
+            {{- if .Values.migrationJob.plan }}
+            - "--plan"
+            {{- end }}
+          env:
+            - name: DOTNET_ENVIRONMENT
+              value: Production
+            - name: DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.azureKeyVault.syncedSecretName }}
+                  key: Database
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.azureKeyVault.enabled }}
+            {{- /* Not read by the container. The driver syncs the Secret only while a pod mounts
+                 the SecretProviderClass, so the Job mounts it. */}}
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.azureKeyVault.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.azureKeyVault.secretProviderClassName | quote }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

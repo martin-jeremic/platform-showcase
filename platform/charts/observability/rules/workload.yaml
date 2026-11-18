@@ -1,0 +1,58 @@
+# Workload-generic alerts, all namespaces. RAW Prometheus rule-group file:
+# promtool-checkable (`promtool check rules observability/rules/workload.yaml`),
+# loaded unrendered by templates/prometheus-rules.yaml via .Files.Get, so
+# {{ $labels.x }} and {{ $value }} pass through to Prometheus untouched.
+#
+# CLUSTER-AWARE ON PURPOSE. The hub-dev hub's Prometheus also holds every
+# spoke's series (observability-ingest remote-writes them in, already stamped
+# with their own `cluster`). An aggregation that drops `cluster` merges two
+# clusters' containers into one series -- and Prometheus then stamps its OWN
+# external label on the result, so a spoke's OOMKill would be reported as the
+# hub's. Every `by` and `on` below therefore carries `cluster`. On a
+# single-cluster Prometheus that is a no-op.
+#
+# Deliberately NOT here, because kube-prometheus-stack defaultRules already
+# cover them (checked against the vendored 92.14.1):
+#   CrashLoopBackOff     -> KubePodCrashLooping                        (kubernetes-apps)
+#   replicas mismatch    -> KubeDeployment/StatefulSetReplicasMismatch (kubernetes-apps)
+#   CPU throttling       -> CPUThrottlingHigh (severity: info)         (kubernetes-resources)
+#
+# Ported from the product lineage of this chart, made cluster-aware.
+groups:
+  - name: platform.workload
+    rules:
+      - alert: PlatformContainerOOMKilled
+        # last_terminated_reason is a sticky gauge; the restart join scopes it to
+        # "OOMKilled recently", not "OOMKilled once, ever".
+        expr: |
+          max by (cluster, namespace, pod, container) (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}) == 1
+          and on (cluster, namespace, pod, container)
+          increase(kube_pod_container_status_restarts_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.container }} OOMKilled"
+          description: >-
+            Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+            on {{ $labels.cluster }} was OOMKilled within the last 15 minutes. Raise the
+            memory limit or fix the leak; PlatformContainerMemoryNearLimit is the early
+            warning for this.
+
+      - alert: PlatformContainerMemoryNearLimit
+        # Early warning BEFORE the OOMKill above. Containers without a memory limit
+        # produce no result (division against an absent series) and never fire this.
+        expr: |
+          max by (cluster, namespace, pod, container) (container_memory_working_set_bytes{container!="", image!=""})
+            / on (cluster, namespace, pod, container)
+          max by (cluster, namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"})
+            > 0.90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.container }} memory >90% of limit"
+          description: >-
+            {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} on
+            {{ $labels.cluster }}: working-set memory has been above 90% of its limit
+            for 15m (currently {{ $value | humanizePercentage }}). It will be
+            OOMKilled if it grows.

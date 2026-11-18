@@ -1,0 +1,27 @@
+{{- /*
+Runtime configuration, the same mechanism as product-a-web plus one file:
+  env.js          window.__env for both SPAs.
+  base-href.conf  the prefix nginx rewrites <base href> to, built from basePath.
+
+basePath must start AND end with "/". Without the trailing slash, "/tms" + "driver/" becomes
+"/tmsdriver/" and every asset 404s; without the leading one the browser resolves the base
+relative to the current URL. Both mistakes render fine and fail in the browser, so the chart
+refuses them at render time instead.
+*/ -}}
+{{- $basePath := required "configMap.basePath is required (\"/\" for none)" .Values.configMap.basePath }}
+{{- if not (and (hasPrefix "/" $basePath) (hasSuffix "/" $basePath)) }}
+{{- fail (printf "configMap.basePath must start and end with \"/\", got %q" $basePath) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pb.fullname" . }}-config
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  env.js: |
+    {{- required "configMap.envJs is required" .Values.configMap.envJs | nindent 4 }}
+  base-href.conf: |
+    set $base_href {{ $basePath | quote }};

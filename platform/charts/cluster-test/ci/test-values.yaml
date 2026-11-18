@@ -1,0 +1,6 @@
+# CI values: a non-production cluster that does publish the page (demo).
+clusterName: aks-product-a-demo
+httpRoute:
+  enabled: true
+  hostnames:
+    - demo.product-a.example.net

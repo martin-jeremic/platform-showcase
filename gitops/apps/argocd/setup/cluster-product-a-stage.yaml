@@ -1,0 +1,27 @@
+# Registers the STAGE spoke. destination.name in appsets/product-a-stage.yaml must equal
+# `product-a-stage` exactly, or the stage Applications never sync. aks-product-a-demo is
+# registered the same way.
+#
+# PREFERRED: let the CLI mint the service account, token and CA:
+#   argocd cluster add <kube-context-of-stage> --name product-a-stage
+# Declarative alternative: fill server / bearerToken / caData, then
+#   kubectl -n argocd-hub apply -f cluster-product-a-stage.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-product-a-stage
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+type: Opaque
+stringData:
+  name: product-a-stage
+  server: https://REPLACE_ME:16443
+  config: |
+    {
+      "bearerToken": "REPLACE_ME",
+      "tlsClientConfig": {
+        "insecure": false,
+        "caData": "REPLACE_ME_BASE64_CA"
+      }
+    }

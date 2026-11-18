@@ -1,0 +1,22 @@
+# The OCI Helm repository the APPLICATION charts are published to (gitops/services
+# pulls them from here; the platform charts are read from git at a tag). Same
+# federated identity as the git repos -- it holds AcrPull on the registry, nothing
+# else. No secret in this file.
+#
+# ONE-TIME, UNMANAGED -- not in ../kustomization.yaml.
+#   kubectl -n argocd-hub replace -f repo-helm-oci.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-helm-orgacr
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: helm
+  name: orgacr
+  # No scheme: OCI repositories are addressed as <registry>/<path>.
+  url: orgacr.azurecr.io/helm
+  enableOCI: "true"
+  useAzureWorkloadIdentity: "true"

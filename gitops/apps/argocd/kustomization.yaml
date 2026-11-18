@@ -1,0 +1,24 @@
+# HUB render target: STAGE and DEMO only.
+#
+# The hub's root Application (declared in gitops/platform and reconciled there) points at this
+# directory; because a kustomization.yaml is present, Argo renders ONLY the resources listed
+# here. Everything else under argocd/ is deliberately absent:
+#   setup/                      one-time repository credentials, applied by setup.sh. If they were
+#                               listed, a prune could delete the credential Argo needs to read the
+#                               repository that tells it what to do, and it could not recover,
+#                               because recovering requires reading that repository.
+#   overlays/prod/              the PROD render target, reconciled by the Argo CD on the prod
+#                               cluster itself.
+#   root-application-prod.yaml  applied by hand, once, on the prod cluster.
+#
+# The two render targets are disjoint by design: listing the prod appset here would make the hub
+# generate Applications for a cluster it has never registered, and listing the stage/demo appsets
+# in the prod overlay would do the mirror image of that on the prod cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # One AppProject per environment (sync-wave -1, applied before the appsets).
+  - projects/product-a-stage.yaml
+  - projects/product-a-demo.yaml
+  - appsets/product-a-stage.yaml
+  - appsets/product-a-demo.yaml

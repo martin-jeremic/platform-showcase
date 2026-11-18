@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "postgres-exporter.fullname" . }}
+  labels:
+    {{- include "postgres-exporter.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "postgres-exporter.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http-metrics
+      port: {{ .Values.service.port }}
+      targetPort: http-metrics
+      protocol: TCP

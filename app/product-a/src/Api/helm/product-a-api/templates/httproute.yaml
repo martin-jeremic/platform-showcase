@@ -1,0 +1,33 @@
+{{- /*
+Gateway API route with two explicit rules, each with its own rewrite (see route in values.yaml).
+No `range` over a rules list: each rule the chart supports is written out and reviewable.
+
+group/kind/weight are the Gateway API defaults, spelled out on purpose: the API server stores
+them, Argo CD diffs parentRefs/backendRefs as whole lists under server-side apply, and a field the
+chart omits but the server adds keeps the Application OutOfSync forever (the sync succeeds, the
+diff never clears).
+*/ -}}
+{{- if and .Values.gateway.enabled .Values.route.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "product-a-api.fullname" . }}
+  labels:
+    {{- include "product-a-api.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      {{- with .Values.gateway.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml (required "route.hostnames is required when route.enabled" .Values.route.hostnames) | nindent 4 }}
+  rules:
+    {{- include "product-a-api.routeRule" (dict "root" . "path" .Values.route.path "rewrite" dict) | nindent 4 }}
+    {{- if .Values.route.hubs.enabled }}
+    {{- include "product-a-api.routeRule" (dict "root" . "path" .Values.route.hubs.path "rewrite" .Values.route.hubs.rewrite) | nindent 4 }}
+    {{- end }}
+{{- end }}

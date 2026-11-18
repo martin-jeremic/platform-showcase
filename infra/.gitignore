@@ -1,0 +1,29 @@
+# State: embeds kubeconfigs, client certs and generated passwords. Never commit.
+*.tfstate
+*.tfstate.*
+# State pulled to disk as JSON (`tofu state pull > x.json`): same secrets, but it does
+# not match *.tfstate.
+*state*.json
+
+**/.terraform/
+.terraform.tfstate.lock.info
+# .terraform.lock.hcl is intentionally NOT ignored: it pins provider hashes.
+
+# Variable files with real or operator-specific values. The committed *.tfvars.example
+# files hold only non-secret settings.
+*.tfvars
+*.auto.tfvars
+
+# Temporary adoption files: they exist only between writing a stack and its first apply.
+imports.tf
+imports-*.tf
+generated.tf
+
+*.tfplan
+crash.log
+crash.*.log
+kubeconfig*.yaml
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

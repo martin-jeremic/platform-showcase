@@ -1,0 +1,7 @@
+# CI values: the on-prem stage spoke -- a LoadBalancer VIP for workstation tools.
+persistence:
+  storageClass: microk8s-hostpath
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.io/loadBalancerIPs: "10.0.0.245"

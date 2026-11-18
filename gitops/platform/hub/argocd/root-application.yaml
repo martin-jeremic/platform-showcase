@@ -1,0 +1,32 @@
+# App-of-apps root. Applied MANUALLY, once, on the hub -- after setup/:
+#   kubectl -n argocd-hub apply -f argocd/root-application.yaml
+# It renders argocd/ through kustomization.yaml (projects + appsets only) and keeps
+# them in sync. Runs in the `default` project, not a platform project: it creates
+# AppProject / ApplicationSet objects in argocd-hub itself, which the restricted
+# per-cluster projects (one destination cluster each) forbid -- and widening them
+# so the root fits would defeat the point of scoping them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-root
+  namespace: argocd-hub
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://dev.azure.com/example-org/platform/_git/org-platform-gitops
+    targetRevision: main
+    path: argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd-hub
+  syncPolicy:
+    automated:
+      # Safe HERE: this app owns only AppProjects and ApplicationSets. Pruning one
+      # removes generated Applications -- and on the hub even that cannot cascade
+      # to workloads (preserveResourcesOnDeletion, no finalizer).
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

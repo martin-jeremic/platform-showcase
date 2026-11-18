@@ -1,0 +1,9 @@
+dependencies:
+- name: secrets-store-csi-driver
+  repository: https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
+  version: 1.6.1
+- name: csi-secrets-store-provider-azure
+  repository: https://azure.github.io/secrets-store-csi-driver-provider-azure/charts
+  version: 1.8.2
+digest: sha256:a4a93e08e32950523134509439228e120a2b71fc4e544b82d19b8e2e6dc18112
+generated: "2026-11-16T21:12:09.2195199+01:00"

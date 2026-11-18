@@ -1,0 +1,16 @@
+# The one host; the static public IP and its resource group are IaC outputs.
+gateway:
+  listeners:
+    websecure:
+      hostname: app.product-a.example.net
+certificate:
+  dnsNames:
+    - app.product-a.example.net
+redirect:
+  hostnames:
+    - app.product-a.example.net
+traefik:
+  service:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-resource-group: rg-product-a-prod-network
+      service.beta.kubernetes.io/azure-pip-name: pip-product-a-prod-edge

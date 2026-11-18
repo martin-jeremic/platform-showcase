@@ -1,0 +1,91 @@
+{
+  "uid": "island-nodes",
+  "title": "Nodes by pool",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "platform"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "description": "Allocatable vs requested per node pool. The production floor pins components to pools by the IaC `pool` label; this is where a Pending pod's cause shows up.",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU requested / allocatable by pool",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{label_pool}}",
+          "expr": "sum by (label_pool) (kube_pod_container_resource_requests{resource=\"cpu\"} * on (node) group_left (label_pool) kube_node_labels) / sum by (label_pool) (kube_node_status_allocatable{resource=\"cpu\"} * on (node) group_left (label_pool) kube_node_labels)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Memory requested / allocatable by pool",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{label_pool}}",
+          "expr": "sum by (label_pool) (kube_pod_container_resource_requests{resource=\"memory\"} * on (node) group_left (label_pool) kube_node_labels) / sum by (label_pool) (kube_node_status_allocatable{resource=\"memory\"} * on (node) group_left (label_pool) kube_node_labels)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

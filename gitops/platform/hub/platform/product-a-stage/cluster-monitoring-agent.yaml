@@ -1,0 +1,9 @@
+# Platform descriptor -- its PRESENCE deploys 'cluster-monitoring-agent' to 'product-a-stage'.
+# Ships metrics, logs and traces to the hub over ONE OTLP mTLS connection. The
+# bundle comes from kv-product-a-stage (servicePrincipal): secrets-store-creds must
+# exist in namespace observability BEFORE this syncs.
+chartPath:     cluster-monitoring-agent
+chartRevision: cluster-monitoring-agent-0.5.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   cluster-monitoring-agent
+namespace:     observability
+syncWave:      "4"

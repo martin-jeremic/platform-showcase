@@ -1,0 +1,74 @@
+# CI for the four HR SPAs of one Nx workspace (company build-once flow). Register as `hr-app-ci`.
+#
+# Version (semantic-release dry run) -> build every app's image ONCE (one entry per app, the
+# template's per-image loop is the matrix) -> one `deploy-meta-hr-<app>` artifact each -> render
+# the SHARED hr-app chart against every app's gitops values -> push the chart once.
+#
+# WHY THE BUILD IS GATED ON isReleaseReady (the template's requireReleaseReady, on by default):
+#   semantic-release sets nextVersion ONLY when it finds a releasable commit. On a `chore:` or
+#   `docs:` commit isReleaseReady is false and nextVersion is UNSET. Without the gate, real images
+#   and a real OCI chart would be published under a junk fallback version, which the CD would then
+#   write into dev and services descriptors. With it, a non-release publishes nothing, and the CD
+#   has no deploy-meta to download and fails loudly instead of promoting a placeholder.
+#
+# WHY EVERY APP IS BUILT ON EVERY RELEASE:
+#   the chart, nginx.conf, entrypoint.sh, the Dockerfile and this pipeline are shared by all four
+#   apps. An Nx `--affected` diff cannot see those files, so a chart-only or infra-only change used
+#   to build nothing and promote nothing. One release == one promotable image per app, all at one
+#   version, the same contract as every single-app frontend.
+#
+# WHY THE CHART IS RENDERED AGAINST GITOPS BEFORE THE PUSH (validateAgainstGitops):
+#   hr-app `required`s every config key. A key the chart needs but an app's gitops values lack
+#   fails HERE, before the chart is pushed, instead of as a ComparisonError in Argo after the
+#   promotion.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+    # Read-only here: the chart is rendered against the values Argo will use.
+    - repository: gitops
+      type: git
+      name: platform/services-gitops
+
+stages:
+  - template: stages/versioning-semantic-release.yml@templates
+
+  - template: stages/build-stage.yml@templates
+    parameters:
+      dependsOn: [Versioning]
+      images:
+        - name: hr-portal
+          dockerfile: Dockerfile
+          buildContext: .
+          buildArgs:
+            APP_NAME: portal
+        - name: hr-admin
+          dockerfile: Dockerfile
+          buildContext: .
+          buildArgs:
+            APP_NAME: admin
+        - name: hr-absence
+          dockerfile: Dockerfile
+          buildContext: .
+          buildArgs:
+            APP_NAME: absence
+        - name: hr-employee-book
+          dockerfile: Dockerfile
+          buildContext: .
+          buildArgs:
+            APP_NAME: employee-book
+      chartName: hr-app
+      chartDir: helm/hr-app
+      # Mounted as the BuildKit secret `npmrc` (Dockerfile: --mount=type=secret,id=npmrc).
+      npmrcSecureFile: npmrc-private-feed
+      validateAgainstGitops: true

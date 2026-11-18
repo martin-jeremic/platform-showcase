@@ -1,0 +1,54 @@
+{{- /*
+Retain StorageClass.
+
+The cluster's `default` StorageClass is reclaimPolicy: Delete and no Retain class
+existed, so deleting a PVC destroyed the underlying disk and everything on it.
+Three components hold state that cannot be regenerated: RabbitMQ queues,
+Elasticsearch indices and Grafana's SQLite database (which is where API-created
+Orgs live -- they exist nowhere else). On the demo cluster the broker landed on
+that Delete-policy default class with 2Gi, one `kubectl delete pvc` away from
+losing every queue.
+
+WHY IT LIVES IN THIS CHART, which is otherwise about CSI secrets.
+It is cluster-scoped, it must exist before ANY PVC that references it, and this is
+the wave-0 component -- the only one guaranteed to be synced before every stateful
+chart. Putting it in the first consumer (RabbitMQ, wave 3) would leave it racing
+Elasticsearch in that same wave: the PVC would sit Pending until the class showed
+up, which self-heals but looks like a failure. One cluster-scoped object with one
+unambiguous owner, created early, is the cheaper arrangement -- the same trade the
+traefik chart makes for the cluster-scoped GatewayClass.
+
+Retain does NOT mean backup. It means the PV and its disk survive PVC deletion, so
+the data can be recovered by binding a new PVC to the released PV. It protects
+against accident, not corruption.
+*/ -}}
+{{- if .Values.retainStorageClass.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.retainStorageClass.name }}
+  labels:
+    {{- include "platform-secrets-store-csi.labels" . | nindent 4 }}
+  annotations:
+    # Cluster-scoped and shared: never remove it just because this release is
+    # uninstalled, or the PVs referencing it are orphaned by name.
+    helm.sh/resource-policy: keep
+    # Same reason on the Argo CD side -- pruning a StorageClass that live PVs
+    # reference is not recoverable by re-syncing.
+    argocd.argoproj.io/sync-options: Prune=false
+    # NOT the cluster default. Only charts that explicitly ask for this class get
+    # Retain semantics, so a careless PVC elsewhere cannot silently start
+    # accumulating undeletable disks.
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: {{ .Values.retainStorageClass.provisioner }}
+reclaimPolicy: Retain
+# WaitForFirstConsumer, not Immediate. Azure disks are zonal: binding the volume
+# before the pod is scheduled can place the disk in a zone the pod cannot reach,
+# and the pod then hangs unschedulable with a volume-node-affinity conflict.
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: {{ .Values.retainStorageClass.allowVolumeExpansion }}
+{{- with .Values.retainStorageClass.parameters }}
+parameters:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}

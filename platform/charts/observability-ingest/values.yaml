@@ -1,0 +1,190 @@
+# =============================================================================
+# observability-ingest -- DEFAULT values
+#
+# Hub-side OTLP gateway. Spokes (cluster-monitoring-agent) push OTLP over mTLS
+# to this gateway's LoadBalancer; it fans out to the in-cluster backends from
+# the `observability` umbrella (kube-prom-stack / loki / tempo).
+#
+# Install:
+#   helm dependency update
+#   helm upgrade --install observability-ingest . -n observability
+# Then issue per-spoke client certs (see README §"Onboard a spoke").
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# OTLP listener ports (the gateway receives on these; apps/spokes send here)
+# -----------------------------------------------------------------------------
+otlp:
+  grpcPort: 4317
+  httpPort: 4318
+
+# -----------------------------------------------------------------------------
+# mTLS -- the gateway presents a server cert and REQUIRES a client cert from
+# every spoke (the spoke's identity). Cert material is provided by `pki` below
+# (or bring your own and point these at existing Secrets).
+#
+# Mount paths are fixed in the Alloy config:
+#   server cert -> /etc/alloy/tls       (keys tls.crt, tls.key)
+#   client CA   -> /etc/alloy/tls-ca    (key  ca.crt)
+# -----------------------------------------------------------------------------
+mtls:
+  enabled: true
+  serverCertSecret: observability-ingest-server-tls
+  caSecret: observability-ingest-ca
+
+# -----------------------------------------------------------------------------
+# PKI (cert-manager) -- create the spoke trust domain.
+#
+# Creates: a self-signed CA, a CA Issuer, and the gateway server cert. The same
+# CA Issuer signs per-spoke client certs (listed in spokeClients). The CA's
+# ca.crt is the trust anchor handed to every spoke.
+#
+# Set create=false to manage the Secrets yourself (named per mtls.* above).
+# -----------------------------------------------------------------------------
+pki:
+  create: true
+  caCommonName: platform-monitoring-spoke-ca
+  caDuration: 87600h          # 10y
+  server:
+    # SANs the spokes connect to. MUST include the hostname/IP in the spoke's
+    # hub.otlp.endpoint. Add the LoadBalancer IP for in-network spokes.
+    dnsNames:
+      - otlp.dev.example.com
+    ipAddresses: []
+    duration: 8760h           # 1y
+
+# Per-spoke client certificates to issue (CN = the spoke's cluster name, which
+# must match the spoke's global.cluster). Each creates Secret spoke-<name>-tls
+# (tls.crt, tls.key) signed by the CA above; the spoke needs that pair plus the
+# CA's ca.crt. With tenancy dynamic this list is ALSO the tenant list: one Loki
+# and one Tempo tenant per entry, named after it (templates/_helpers.tpl).
+#
+#   name      the spoke's cluster name (= global.cluster = CN)
+#   duration  cert lifetime, default 8760h (1y); cert-manager renews 30d before
+#             expiry. A spoke that mounts a COPY of the bundle from Key Vault
+#             (cluster-monitoring-agent mtls.source keyVault) cannot follow a
+#             renewal: give it the CA's lifetime (87600h) so the copy is never
+#             stale while the CA lives.
+spokeClients: []
+#  - name: product-a-stage
+#    duration: 87600h
+
+# -----------------------------------------------------------------------------
+# Backends -- where the gateway fans out. Defaults match the `observability`
+# umbrella's Service names in this namespace.
+# -----------------------------------------------------------------------------
+backends:
+  prometheus:
+    # Requires Prometheus started with --web.enable-remote-write-receiver.
+    remoteWriteUrl: http://kube-prom-stack-kube-prome-prometheus.observability.svc.cluster.local:9090/api/v1/write
+  loki:
+    pushUrl: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+  tempo:
+    otlpEndpoint: tempo.observability.svc.cluster.local:4317
+
+# -----------------------------------------------------------------------------
+# Tenancy (per-client isolation via X-Scope-OrgID).
+#
+# OFF by default -- enable in step with backend tenancy (loki.auth_enabled /
+# tempo.multitenancyEnabled). Once enabled, `mode` chooses how the tenant is set:
+#   dynamic -> the tenant is the `cluster` each spoke's agent stamps on its
+#              signals. Logs: stage.tenant reads the Loki stream label
+#              (cluster-monitoring-agent sets loki.attribute.labels=cluster).
+#              Traces: Alloy has no per-attribute trace router, so the gateway
+#              renders one filter + Tempo exporter per spokeClients entry, each
+#              keeping only that spoke's spans and sending X-Scope-OrgID = its
+#              name. Correct for any number of spokes, no config beyond the
+#              spokeClients entry every spoke needs anyway for its cert.
+#   static  -> send `staticTenant` for EVERY spoke, logs and traces alike. Only
+#              correct with a single spoke; a second spoke would land in the
+#              wrong tenant.
+# Metrics are never given a tenant header in dynamic mode (shared Prometheus;
+# metrics isolation deferred -- see grafana-multitenancy docs).
+# -----------------------------------------------------------------------------
+tenancy:
+  enabled: false
+  mode: dynamic
+  staticTenant: ""
+
+# -----------------------------------------------------------------------------
+# Exposure -- how spokes reach the gateway's OTLP ports. Backends never exposed.
+#
+# The on-prem hub has NO LoadBalancer; Traefik runs as NodePort and an external
+# proxy forwards internet traffic to the node. So default to NodePort and have that
+# proxy TCP-forward (L4 passthrough) the OTLP port to this NodePort.
+#
+# WARNING: the data plane is gRPC + mTLS terminated by THIS gateway. The external proxy
+#    (and Traefik) must NOT HTTP-proxy or TLS-terminate this port -- raw TCP only,
+#    or the spoke client cert never arrives and mTLS fails. See README.
+#
+# type: NodePort | LoadBalancer | ClusterIP
+# -----------------------------------------------------------------------------
+service:
+  type: NodePort
+  annotations: {}
+  # NodePort numbers (30000-32767). Leave null to let Kubernetes assign.
+  nodePorts:
+    grpc: 31317
+    http: 31318
+
+# =============================================================================
+# Grafana Alloy subchart (the gateway runtime)
+# Full schema: https://github.com/grafana/alloy/blob/main/operations/helm/charts/alloy/values.yaml
+# =============================================================================
+alloy:
+  enabled: true
+
+  controller:
+    type: deployment
+    replicas: 2
+    # Production floor: the single ingress for every spoke's telemetry.
+    priorityClassName: system-cluster-critical
+    # Mount the server cert + client CA.
+    volumes:
+      extra:
+        - name: server-tls
+          secret:
+            secretName: observability-ingest-server-tls
+        - name: ca
+          secret:
+            secretName: observability-ingest-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+
+  # A pure OTLP gateway needs no Kubernetes API access.
+  rbac:
+    create: false
+
+  alloy:
+    configMap:
+      create: false
+      name: observability-ingest-alloy-config
+      key: config.alloy
+
+    mounts:
+      extra:
+        - name: server-tls
+          mountPath: /etc/alloy/tls
+          readOnly: true
+        - name: ca
+          mountPath: /etc/alloy/tls-ca
+          readOnly: true
+
+    extraPorts:
+      - name: otlp-grpc
+        port: 4317
+        targetPort: 4317
+        protocol: TCP
+      - name: otlp-http
+        port: 4318
+        targetPort: 4318
+        protocol: TCP
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi

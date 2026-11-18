@@ -1,0 +1,30 @@
+{{- /*
+The MCP host authenticates nobody: every caller that reaches it may run domain tools. So the
+boundary is enforced here: ingress only from the agent layer's pods in this namespace, on the
+http port. Not even the API, and not the gateway (there is no HTTPRoute for this Service).
+
+Egress (DNS, PostgreSQL) is left to the cluster's own policy: the database is outside the cluster
+and its address is an environment fact, not a chart fact.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "pb.fullname" . }}
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "pb.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ required "networkPolicy.agentsName is required" .Values.networkPolicy.agentsName }}
+      ports:
+        - protocol: TCP
+          port: http
+{{- end }}

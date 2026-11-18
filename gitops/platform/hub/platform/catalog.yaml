@@ -1,0 +1,244 @@
+# platform/catalog.yaml -- component defaults for the platform tree.
+#
+# HUMAN-EDITED source of truth for each component's invariant fields. NOT read by
+# Argo CD: it sits at platform/*.yaml, which the platform/<cluster>/*.yaml
+# generator globs do not match. component.sh reads it to scaffold
+# platform/<cluster>/<component>.yaml and validates descriptors against it.
+#
+#   chartPath      directory in the charts repo (org-platform)
+#   chartRevision  the tag a NEW descriptor starts on: <chartPath>-<Chart.yaml version>
+#   releaseName    Helm release name (must match the LIVE release on adopt-in-place)
+#   namespace      destination namespace
+#   syncWave       lower = earlier (CRDs and foundations first)
+#   scope          ADVISORY only: hub | spokes | all | placeholder. Presence of a
+#                  descriptor is authoritative; component.sh only WARNS on a
+#                  mismatch, never blocks.
+#   notes          folded prose (`>-`). Its continuation lines are free text, which
+#                  is why component.sh reads fields at the component's own indent
+#                  only -- see catalog_field there.
+components:
+  argocd:
+    chartPath: argocd
+    chartRevision: argocd-1.3.0
+    releaseName: argocd
+    namespace: argocd-hub
+    syncWave: "2"
+    scope: hub
+    notes: >-
+      Argo CD manages its own chart. The hub descriptor sets selfManaged: true
+      (manual sync): a change shows OutOfSync until someone has reviewed the diff
+      and pressed Sync, so a bad render cannot take the syncer down unattended.
+      prune: false would be noted here as well -- but a selfManaged Application
+      never syncs automatically at all.
+  argocd-cluster-registry:
+    chartPath: argocd-cluster-registry
+    chartRevision: argocd-cluster-registry-0.2.0
+    releaseName: argocd-cluster-registry
+    namespace: argocd-hub
+    syncWave: "3"
+    scope: hub
+    notes: >-
+      Spoke registrations as ExternalSecrets (tokens in Key Vault). Before 0.2.0
+      the chart took tokens through --set, so an Argo render would have blanked
+      every cluster Secret and disconnected every spoke; registration stayed
+      hand-applied (argocd/setup/cluster-template.yaml) until then.
+  observability:
+    chartPath: observability
+    chartRevision: observability-3.4.0
+    releaseName: observability
+    namespace: observability
+    syncWave: "3"
+    scope: all
+    notes: >-
+      Central full stack on the hub; standalone stack on aks-org-prod and
+      aks-product-a-demo. PVC state -- adopt, never prune.
+  observability-ingest:
+    chartPath: observability-ingest
+    chartRevision: observability-ingest-0.3.0
+    releaseName: observability-ingest
+    namespace: observability
+    syncWave: "4"
+    scope: hub
+    notes: >-
+      Receives the agent spokes' OTLP over mTLS.
+  observability-log-rules:
+    chartPath: observability-log-rules
+    chartRevision: observability-log-rules-0.2.0
+    releaseName: log-rules
+    namespace: observability
+    syncWave: "5"
+    scope: all
+    notes: >-
+      One descriptor PER LOKI TENANT (platform/<cluster>/log-rules-<tenant>.yaml,
+      releaseName log-rules-<tenant>), so validate matches it by chartPath, not by
+      file name.
+  grafana-sso-gateway:
+    chartPath: grafana-sso-gateway
+    chartRevision: grafana-sso-gateway-1.0.2
+    releaseName: grafana-sso-gateway
+    namespace: observability
+    # BEFORE observability: this release creates the Secret Grafana renders a
+    # non-optional envFrom to. At wave 4 (its old value) Grafana came up first from
+    # zero and sat in CreateContainerConfigError.
+    syncWave: "2"
+    scope: all
+    notes: >-
+      Exposure + Keycloak OIDC config for Grafana. prune: false here would be
+      wrong -- it owns nothing stateful.
+  cert-manager:
+    chartPath: cert-manager
+    chartRevision: cert-manager-1.1.0
+    releaseName: cert-manager
+    namespace: cert-manager
+    syncWave: "1"
+    scope: all
+    notes: >-
+      crds.keep. On the hub the MicroK8s add-on was adopted in place: only the
+      release name `cert-manager` renders the add-on's immutable Deployment
+      selectors. Never `microk8s disable cert-manager` there -- it deletes the CRDs
+      and every Certificate.
+  traefik:
+    chartPath: traefik
+    chartRevision: traefik-1.2.0
+    releaseName: traefik-gateway
+    namespace: traefik
+    syncWave: "2"
+    scope: all
+    notes: >-
+      Owns the Gateway API CRDs and the safe-upgrades admission policy -- the
+      AppProject must allow ValidatingAdmissionPolicy(+Binding).
+  reloader:
+    chartPath: reloader
+    chartRevision: reloader-1.0.1
+    releaseName: reloader
+    namespace: reloader
+    syncWave: "3"
+    scope: all
+    notes: ""
+  secrets-store-csi:
+    chartPath: secrets-store-csi
+    chartRevision: secrets-store-csi-1.0.1
+    releaseName: secrets-store-csi
+    namespace: secrets-store-csi
+    syncWave: "0"
+    scope: all
+    notes: >-
+      On a cluster that already runs the driver never install this chart into a
+      second namespace: DaemonSets are namespaced, so that is a second driver on
+      the same node socket.
+  oidc-issuer:
+    chartPath: oidc-issuer
+    chartRevision: oidc-issuer-0.1.0
+    releaseName: oidc-issuer
+    namespace: default
+    syncWave: "2"
+    scope: hub
+    notes: >-
+      Publishes the hub's service-account issuer so Entra can verify its tokens:
+      Argo CD's repo-server reads Azure DevOps with a federated identity instead
+      of a PAT. Namespace MUST be default.
+  vpa:
+    chartPath: vpa
+    chartRevision: vpa-0.1.0
+    releaseName: vpa
+    namespace: vpa
+    syncWave: "1"
+    scope: hub
+    notes: >-
+      Measurement-only (recommender, no updater, no admission controller). AKS
+      clusters use the managed add-on instead.
+  trivy:
+    chartPath: trivy
+    chartRevision: trivy-0.3.1
+    releaseName: trivy
+    namespace: trivy
+    syncWave: "5"
+    scope: all
+    notes: >-
+      Its own namespace ON PURPOSE: the upstream Role can write every Secret in it
+      and each scan copies the workload's pull credentials there. Where Reloader
+      runs autoReloadAll, reloader ignoreJobs must be on FIRST.
+  cluster-monitoring-agent:
+    chartPath: cluster-monitoring-agent
+    chartRevision: cluster-monitoring-agent-0.5.0
+    releaseName: cluster-monitoring-agent
+    namespace: observability
+    syncWave: "4"
+    scope: spokes
+    notes: >-
+      Agent spokes only. Its vault must hold the three cluster-monitoring-agent--*
+      objects BEFORE the first sync, or the Alloy pod sits in ContainerCreating.
+  rbac:
+    chartPath: rbac
+    chartRevision: rbac-1.0.0
+    releaseName: rbac
+    namespace: kube-system
+    syncWave: "3"
+    scope: spokes
+    notes: >-
+      Entra group -> Kubernetes RBAC plus the app namespaces. AKS with Entra only.
+  rabbitmq:
+    chartPath: rabbitmq
+    chartRevision: rabbitmq-1.2.0
+    releaseName: rabbitmq
+    namespace: rabbitmq
+    syncWave: "3"
+    scope: all
+    notes: >-
+      CSI-backed credentials. Seed the vault (and, on a servicePrincipal cluster,
+      secrets-store-creds in ns rabbitmq) BEFORE the first sync.
+  elasticsearch:
+    chartPath: elasticsearch
+    chartRevision: elasticsearch-1.1.0
+    releaseName: elasticsearch
+    namespace: infrastructure
+    syncWave: "3"
+    scope: all
+    notes: >-
+      Auth ON; no HTTPRoute; explicit storageClass required (immutable).
+  mongo:
+    chartPath: mongo
+    chartRevision: mongo-0.2.0
+    releaseName: mongo
+    namespace: mongo
+    syncWave: "3"
+    scope: spokes
+    notes: >-
+      Standalone document store; StatefulSet-owned PVC, never pruned.
+  azurite:
+    chartPath: azurite
+    chartRevision: azurite-0.2.0
+    releaseName: azurite
+    namespace: infrastructure
+    syncWave: "3"
+    scope: spokes
+    notes: >-
+      Storage emulator for clusters with no Storage account. No secret: the
+      emulator key is a public constant.
+  cluster-test:
+    chartPath: cluster-test
+    chartRevision: cluster-test-1.1.0
+    releaseName: cluster-test
+    namespace: cluster-test
+    syncWave: "5"
+    scope: all
+    notes: ""
+  headlamp:
+    chartPath: headlamp
+    chartRevision: headlamp-0.2.0
+    releaseName: headlamp
+    namespace: headlamp
+    syncWave: "5"
+    scope: placeholder
+    notes: >-
+      Not deployed anywhere yet: needs the API server's structured authentication
+      config for the Keycloak issuer first.
+  minio:
+    chartPath: minio
+    chartRevision: minio-0.2.0
+    releaseName: minio
+    namespace: minio
+    syncWave: "3"
+    scope: placeholder
+    notes: >-
+      Not a committed target.

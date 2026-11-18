@@ -1,0 +1,90 @@
+# CI values: the hub's shape -- on-prem MicroK8s, filesystem storage, a
+# self-managed control plane, the hub-only rule files, a second alert audience for
+# the agent spoke, and the servicePrincipal Key Vault option.
+kubePromStack:
+  kubeEtcd:
+    enabled: false
+  kubeControllerManager:
+    endpoints:
+      - 10.0.0.10
+  kubeScheduler:
+    endpoints:
+      - 10.0.0.10
+  prometheus:
+    prometheusSpec:
+      externalLabels:
+        cluster: hub-dev
+  alertmanager:
+    alertmanagerSpec:
+      volumes:
+        - name: alertmanager-kv
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: alertmanager-kv
+            nodePublishSecretRef:
+              name: secrets-store-creds
+      volumeMounts:
+        - name: alertmanager-kv
+          mountPath: /etc/alertmanager/kv
+          readOnly: true
+  grafana:
+    persistence:
+      storageClassName: microk8s-hostpath
+      size: 2Gi
+    grafana.ini:
+      server:
+        domain: dev.example.com
+        root_url: https://dev.example.com/monitoring/grafana
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        access: proxy
+        jsonData:
+          httpHeaderName1: X-Scope-OrgID
+        secureJsonData:
+          # Pipe-joined: the Main Org sees every tenant (federated read).
+          httpHeaderValue1: "hub-dev|product-a-stage"
+
+loki:
+  singleBinary:
+    persistence:
+      storageClass: microk8s-hostpath
+      size: 20Gi
+
+alloyPipeline:
+  cluster: hub-dev
+  tenant: hub-dev
+
+prometheusRules:
+  files:
+    certificates: true
+    edge: true
+    rabbitmq: true
+    keycloak: true
+    argocd: true
+    spokes: true
+    controlplane: true
+    trivy: true
+
+notifications:
+  enabled: true
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  graph:
+    clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    sender: alerts@example.com
+    recipients:
+      - platform-team@example.com
+  audiences:
+    product-a:
+      clusters:
+        - product-a-stage
+      sender: alerts@example.com
+      recipients:
+        - product-a-oncall@example.com
+  keyVault:
+    keyvaultName: kv-org-dev
+    authMode: servicePrincipal

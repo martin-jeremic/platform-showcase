@@ -1,0 +1,9 @@
+observability "{{ .Release.Name }}" for cluster {{ .Values.kubePromStack.prometheus.prometheusSpec.externalLabels.cluster }}.
+
+  Metrics retention : {{ .Values.kubePromStack.prometheus.prometheusSpec.retention }}
+  Logs retention    : {{ .Values.loki.loki.limits_config.retention_period }} (Loki tenant {{ .Values.alloyPipeline.tenant }})
+  Traces            : {{ if .Values.components.tempo }}Tempo (multi-tenant){{ else }}off{{ end }}
+  Notifications     : {{ if .Values.notifications.enabled }}ON (Teams + Graph mail, credentials from {{ .Values.notifications.keyVault.keyvaultName }}){{ else }}off -- everything routes to "null"{{ end }}
+
+Verify the Alertmanager binary is the pinned one (>= 0.34 is load-bearing):
+  kubectl -n {{ .Release.Namespace }} exec alertmanager-{{ .Values.kubePromStack.fullnameOverride }}-alertmanager-0 -c alertmanager -- alertmanager --version

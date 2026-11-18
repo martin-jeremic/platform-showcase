@@ -1,0 +1,29 @@
+{{- /*
+Render one AppProject per entry in .Values.projects — the tenancy boundary that
+isolates unrelated apps/clusters (allowed source repos, destinations, and
+cluster-scoped resources).
+*/ -}}
+{{- $ns := .Values.argocdNamespace -}}
+{{- range .Values.projects }}
+{{- if not .name }}{{ fail "every projects[] entry needs a name" }}{{- end }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {{ .name }}
+  namespace: {{ $ns }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: {{ .description | default (printf "Project %s" .name) | quote }}
+  sourceRepos:
+    {{- toYaml (.sourceRepos | default (list "*")) | nindent 4 }}
+  destinations:
+    {{- toYaml (.destinations | default list) | nindent 4 }}
+  {{- with .clusterResourceWhitelist }}
+  clusterResourceWhitelist:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  namespaceResourceWhitelist:
+    {{- toYaml (.namespaceResourceWhitelist | default (list (dict "group" "*" "kind" "*"))) | nindent 4 }}
+{{- end }}

@@ -1,0 +1,108 @@
+# ApplicationSet for STAGE (hub Argo CD, spoke product-a-stage).
+#
+# The Git files generator makes the file tree the source of truth: a service is deployed to stage
+# IFF apps/<svc>/stage/release.yaml exists. Adding a service = adding its folder; this file never
+# grows. (It replaced one hand-written Application per service and env.)
+#
+# For apps/<svc>/stage/release.yaml, path.segments = ["apps", "<svc>", "stage"], so
+# {{index .path.segments 1}} is the service name (== the OCI chart name).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: product-a-stage
+  namespace: argocd-hub
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]   # fail loudly if a release.yaml lacks chart.version
+  syncPolicy:
+    # Removing a service's files removes its generated Application and, through the finalizer
+    # below, its workloads. Stated explicitly instead of relying on the controller default.
+    preserveResourcesOnDeletion: false
+  generators:
+    - git:
+        repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+        revision: main
+        files:
+          - path: "apps/*/stage/release.yaml"
+  template:
+    metadata:
+      name: "{{index .path.segments 1}}-stage"
+      namespace: argocd-hub
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+      labels:
+        app.kubernetes.io/part-of: product-a
+        example.com/service: "{{index .path.segments 1}}"
+        example.com/env: stage
+        example.com/cluster: product-a-stage
+    spec:
+      # Per-env AppProject: permits only this destination and carries the stage team's role.
+      project: product-a-stage
+      sources:
+        # 1) The chart from the registry (OCI), at the EXACT version in release.yaml, which only
+        #    the approval-gated Promote stage writes. Never promoted = no release.yaml = no
+        #    Application.
+        - repoURL: productacr.azurecr.io/helm
+          chart: "{{index .path.segments 1}}"
+          targetRevision: "{{.chart.version}}"
+          helm:
+            valueFiles:
+              - "$values/apps/{{index .path.segments 1}}/stage/values.yaml"
+              # Listed last so the promoted digest overrides anything in values.yaml.
+              - "$values/apps/{{index .path.segments 1}}/stage/image.yaml"
+        # 2) This repository as the $values source.
+        - repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+          targetRevision: main
+          ref: values
+      destination:
+        name: product-a-stage          # registered spoke cluster
+        namespace: product-a-stage
+      ignoreDifferences:
+        # Reloader stamps this annotation on the pod template to roll pods when a watched
+        # ConfigMap/Secret changes. It is not in Git, so selfHeal would revert it: a redundant
+        # second restart plus a permanent OutOfSync. Ignored on EVERY kind Reloader restarts (the
+        # reloaders run with auto-reload-all, so StatefulSets and DaemonSets are stamped too).
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: apps
+          kind: DaemonSet
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: batch
+          kind: CronJob
+          jsonPointers:
+            - /spec/jobTemplate/spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+      syncPolicy:
+        # Defaults for every app. A release.yaml MAY override prune/selfHeal per app; that
+        # override lives in templatePatch below and NOT here: the CRD types these two fields as
+        # booleans, and a template STRING in their place is rejected by the API server
+        # ("expected boolean"), which once kept this whole file from being applied at all.
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          # LOAD-BEARING: keeps ignoreDifferences honoured when a sync DOES happen. Without it a
+          # sync applies the full manifest and strips the Reloader stamp anyway, causing exactly
+          # the restart ignoreDifferences exists to prevent.
+          - RespectIgnoreDifferences=true
+  # Per-app override. A templatePatch is a STRING rendered by the Go template engine and parsed
+  # as YAML afterwards, so the unquoted values below come out as real booleans: the only way to
+  # template a non-string field. `dig` walks the path safely under missingkey=error and returns
+  # the default (prune=true, selfHeal=true) when release.yaml lacks syncPolicy, automated or the
+  # key. E.g. the migration Job chart sets selfHeal: false without turning it off for every
+  # other app (selfHeal + a deleted Job would re-run DDL on its own schedule).
+  # Patches ONLY syncPolicy.automated: maps merge, so syncOptions and every other template field
+  # are untouched (naming `sources` here would REPLACE that list).
+  templatePatch: |
+    spec:
+      syncPolicy:
+        automated:
+          prune: {{ dig "syncPolicy" "automated" "prune" true . }}
+          selfHeal: {{ dig "syncPolicy" "automated" "selfHeal" true . }}

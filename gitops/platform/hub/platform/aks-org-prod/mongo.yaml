@@ -1,0 +1,8 @@
+# Platform descriptor -- its PRESENCE deploys 'mongo' to 'aks-org-prod'.
+# SEED THE VAULT BEFORE THIS FIRST SYNCS -- the CSI driver fails the whole mount
+# if mongo--admin-password is absent, and the pod sits in ContainerCreating.
+chartPath:     mongo
+chartRevision: mongo-0.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   mongo
+namespace:     mongo
+syncWave:      "3"

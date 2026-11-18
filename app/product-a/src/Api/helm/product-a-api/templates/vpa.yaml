@@ -1,0 +1,25 @@
+{{- /* Recommendation only (updateMode "Off"); see verticalPodAutoscaler in values.yaml.
+     Read the result with: kubectl get vpa <name> -o jsonpath='{.status.recommendation}' */ -}}
+{{- if .Values.verticalPodAutoscaler.enabled }}
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "product-a-api.fullname" . }}
+  labels:
+    {{- include "product-a-api.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "product-a-api.fullname" . }}
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledResources: ["cpu", "memory"]
+        minAllowed:
+          {{- toYaml .Values.verticalPodAutoscaler.minAllowed | nindent 10 }}
+        maxAllowed:
+          {{- toYaml .Values.verticalPodAutoscaler.maxAllowed | nindent 10 }}
+{{- end }}

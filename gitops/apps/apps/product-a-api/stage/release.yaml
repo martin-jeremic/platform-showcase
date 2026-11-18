@@ -1,0 +1,5 @@
+# Chart-version pin for product-a-api (stage), read by the ApplicationSet git-files generator.
+# .chart.version is written by the approval-gated promotion. Any OTHER top-level key
+# (e.g. syncPolicy) is hand-maintained and preserved across promotions.
+chart:
+  version: "1.8.2"

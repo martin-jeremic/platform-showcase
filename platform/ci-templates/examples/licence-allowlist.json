@@ -1,0 +1,47 @@
+{
+  "_comment": "Shape of the licence gate a product used for its .NET, npm and Python dependencies. Every entry carries a reason: an allow-list nobody can explain is a list nobody can maintain. Not wired into any template here; see the KNOWN-GAPS section of the README for why it was taken out of the PR pipelines.",
+  "_whyDenyIsSeparate": "An allow-list answers 'is this known'. The deny list answers 'is this the specific thing we decided against', and gives a better error than 'unknown package' when someone adds the paid edition of a component whose free edition was chosen deliberately.",
+  "_whyNpmIsCheckedByLicence": "NuGet lock files carry no licence, so NuGet packages are matched by NAME. npm lock files declare a licence for almost every package, so npm is matched by LICENCE: one Angular workspace pulls well over a thousand packages, and a name list of that size is a gate somebody eventually turns off.",
+  "nuget": {
+    "allow": [
+      { "pattern": "^System\\.", "reason": "Base class library." },
+      { "pattern": "^Microsoft\\.(Extensions|AspNetCore|EntityFrameworkCore|NET|CodeAnalysis|Bcl)\\.", "reason": "Microsoft platform, MIT." },
+      { "pattern": "^Serilog(\\..+)?$", "reason": "Structured logging, Apache-2.0." },
+      { "pattern": "^Npgsql", "reason": "PostgreSQL driver and EF provider, PostgreSQL Licence (BSD-like)." },
+      { "pattern": "^xunit", "reason": "Test framework, Apache-2.0 / MIT. Test-only." }
+    ],
+    "deny": [
+      { "id": "example-grid-enterprise", "reason": "The grid component is used under its MIT community edition. The enterprise edition is a per-developer paid licence nobody bought; needing it is a commercial decision, not a package install." }
+    ]
+  },
+  "npmLicences": {
+    "allow": [
+      { "id": "MIT", "reason": "Permissive." },
+      { "id": "ISC", "reason": "Permissive, functionally MIT." },
+      { "id": "BSD-2-Clause", "reason": "Permissive." },
+      { "id": "BSD-3-Clause", "reason": "Permissive." },
+      { "id": "Apache-2.0", "reason": "Permissive, explicit patent grant." },
+      { "id": "0BSD", "reason": "Permissive." },
+      { "id": "CC0-1.0", "reason": "Public domain dedication." },
+      { "id": "MPL-2.0", "reason": "Weak, FILE-level copyleft, and a deliberate decision: reached only through a build-time CSS tool that is neither modified nor shipped. Patching one of its files would oblige publishing that file; revisit this entry if that ever happens." }
+    ],
+    "deny": [
+      { "id": "GPL-3.0", "reason": "Strong copyleft." },
+      { "id": "AGPL-3.0", "reason": "Network copyleft: fatal for a SaaS product, serving it over a network triggers the obligation." },
+      { "id": "SSPL-1.0", "reason": "Not open source; its service-source obligation targets exactly this kind of product." },
+      { "id": "BUSL-1.1", "reason": "Source-available with a commercial-use restriction." }
+    ],
+    "exceptions": [
+      {
+        "id": "example-transitive-package",
+        "version": "0.5.0",
+        "declared": "none",
+        "believedLicence": "MIT",
+        "evidence": "The published package omits the licence field; the upstream repository carries an MIT LICENSE file.",
+        "whySafe": "Build-time only, reached transitively through a local dev server; never shipped.",
+        "needsHumanConfirmation": true,
+        "reason": "Pinned to a version on purpose: a package that omitted its licence at 0.5.0 may declare something else at 0.6.0, and an unpinned exception would cover that silently."
+      }
+    ]
+  }
+}

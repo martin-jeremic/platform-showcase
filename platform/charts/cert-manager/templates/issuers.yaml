@@ -1,0 +1,15 @@
+{{- /* Namespaced issuers, list-driven. Each entry: { name, namespace, enabled, spec }. */ -}}
+{{- range .Values.issuers }}
+{{- if .enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "platform-cert-manager.labels" $ | nindent 4 }}
+spec:
+  {{- toYaml .spec | nindent 2 }}
+{{- end }}
+{{- end }}

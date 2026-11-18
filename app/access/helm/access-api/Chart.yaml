@@ -1,0 +1,6 @@
+apiVersion: v2
+name: access-api
+description: Access (permissions) API. Stub chart showing the VPA template.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

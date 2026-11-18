@@ -1,0 +1,42 @@
+# Exceptions for scripts/check-configmaps.py.
+# EVERY ENTRY MUST SAY WHY. An unexplained exception is how the drift came back last time.
+
+# Apps allowed to inherit a chart default for an OWNED_KEYS entry. Empty on purpose: a service
+# that genuinely must not scale says so with an explicit `replicaCount: 1` and a comment, not by
+# omitting the key.
+allowChartDefault: {}
+
+# Generic Helm extension points, not per-environment decisions. Ignored by the owned-keys check so
+# every values file is not padded with empty boilerplate nobody will ever edit.
+structuralKeys:
+  - volumes
+  - volumeMounts
+  - podAnnotations
+
+# ConfigMap keys allowed to render identically with and without the env's config block
+# (check 4). Empty on purpose: an inherited key is exactly the failure that let one service's
+# whole ConfigMap stay chart-owned while every other check passed.
+allowInherited: {}
+
+# Keys whose rendered value is deliberately empty.
+allowEmpty: {}
+
+# Keys allowed to exist in some environments but not others.
+allowEnvOnly:
+  product-a-api:
+    # Stage runs the admin endpoints for test-data resets. The chart renders the admin token
+    # audience only when adminOperations is enabled, so demo and prod have no such key at all.
+    - AdminOperations__Audience
+
+# Apps whose chart renders no ConfigMap. Config for these is either nothing (the Job chart reads
+# only its connection string from Key Vault) or written at container start (the SPA's env.js).
+# Check 0 (owned keys) still applies to them.
+skipApps:
+  # Job-only chart: no Deployment, no ConfigMap, ever.
+  - product-a-db
+
+# Pairs of apps that MUST carry the same chart.version and image.digest in every environment: the
+# second app is a companion chart that runs the first app's own image and is recorded and promoted
+# in the same commit. Checked regardless of --app and skipApps.
+pinPairs:
+  - [product-a-api, product-a-db]

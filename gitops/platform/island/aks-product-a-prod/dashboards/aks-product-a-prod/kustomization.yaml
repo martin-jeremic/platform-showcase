@@ -1,0 +1,48 @@
+# Grafana dashboards for aks-product-a-prod: one ConfigMap per Grafana FOLDER.
+#
+# Grafana's dashboard sidecar does not care which release or Application created a
+# ConfigMap -- only that it carries the discovery label below and lives in the
+# namespace the sidecar searches (observability). That indirection is why
+# cluster-owned dashboards live HERE rather than in the chart: Helm's .Files.Get can
+# only read files inside its own chart, so a chart-based dashboard sits behind a
+# chart version bump and a git tag. Here a dashboard change is one commit.
+#
+# ADDING A DASHBOARD: drop the JSON into its folder, add it to that folder's
+# `files:` list (or add a folder + a configMapGenerator entry), commit. The JSON
+# needs a unique top-level `uid` and must NOT contain an `__inputs` block -- file
+# provisioning never resolves it, and every panel says "Datasource not found".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: observability
+
+generatorOptions:
+  labels:
+    # The discovery contract with kubePromStack.grafana.sidecar.dashboards. Both the
+    # key AND the value must match: the chart pins labelValue "1", so a ConfigMap
+    # labelled grafana_dashboard: "true" is ignored.
+    grafana_dashboard: "1"
+  # Name-suffix hashing stays ON: the ConfigMap name changes whenever the JSON
+  # changes, so the sidecar sees a genuinely new object and reloads. The cost --
+  # old ConfigMaps must be pruned -- the Application pays (prune: true).
+  disableNameSuffixHash: false
+
+configMapGenerator:
+  - name: dashboards-platform
+    files:
+      - platform/nodes.json
+    options:
+      annotations:
+        # Read by the sidecar's folderAnnotation, which only takes effect because the
+        # chart also sets provider.foldersFromFilesStructure: true. With one of the
+        # two, every dashboard lands flat in "General".
+        grafana_folder: Platform
+
+  # Product A's own services, from their logs on the log contract. The fields
+  # these read are set by the contract stage of the chart's Alloy.
+  - name: dashboards-product
+    files:
+      - product/ingest-rate.json
+    options:
+      annotations:
+        grafana_folder: Product A

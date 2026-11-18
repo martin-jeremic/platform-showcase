@@ -1,0 +1,225 @@
+{{- include "rabbitmq.validate" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "rabbitmq.fullname" . }}
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    # Stakater Reloader watches every ConfigMap and Secret this StatefulSet
+    # references -- the KV-synced Secret and the conf.d drop-in -- and restarts
+    # the pod when one changes. That is the point for Key Vault rotation: the
+    # password is read once at broker startup.
+    #
+    # This annotation must sit on the WORKLOAD, not the pod template. It was on
+    # the pod template until 1.1.0, where Reloader never reads it, so rotation
+    # had in fact never restarted anything. It was also `match`, which does
+    # nothing without a paired `search` annotation on the Secret.
+    #
+    # NOTE the cost: this is a single-replica broker, so any watched change --
+    # rotation or a conf edit -- is a brief AMQP outage.
+    reloader.stakater.com/auto: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "rabbitmq.fullname" . }}-headless
+  selector:
+    matchLabels:
+      {{- include "rabbitmq.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "rabbitmq.selectorLabels" . | nindent 8 }}
+        {{- if and .Values.azureKeyVault.enabled (eq .Values.azureKeyVault.authMode "workloadIdentity") }}
+        # Required for Azure Workload Identity. Without this label the mutating
+        # webhook never injects the projected SA token, and the CSI mount fails
+        # even though the ServiceAccount annotation and the federated credential
+        # are both correct. It is the easiest of the three pieces to forget.
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "rabbitmq.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The PVC + fsGroup combination breaks RabbitMQ on every pod RESTART: kubelet's
+      # fsGroup pass (fsGroupChangePolicy defaults to "Always") re-chmods every file on
+      # the volume to group-accessible on each mount, and RabbitMQ refuses to boot unless
+      # .erlang.cookie is exactly 0600 ("Cookie file ... must be accessible by owner
+      # only", auth.erl). First boot works only because the volume is empty then.
+      # Restore the cookie's permissions after the fsGroup pass, before the broker starts;
+      # uid 999 owns the file, so chmod needs no extra privileges.
+      initContainers:
+        - name: fix-cookie-perms
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - if [ -f /var/lib/rabbitmq/.erlang.cookie ]; then chmod 600 /var/lib/rabbitmq/.erlang.cookie; fi
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+      containers:
+        - name: rabbitmq
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.featureFlags.autoEnableAll }}
+          # Enable every stable feature flag once the broker is up (see values.yaml
+          # featureFlags). The broker is PID 1 in this image; `wait --pid 1` returns
+          # when it has finished booting.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - rabbitmqctl wait --pid 1 --timeout 600 && rabbitmqctl enable_feature_flag all
+          {{- end }}
+          ports:
+            - name: amqp
+              containerPort: 5672
+              protocol: TCP
+            - name: management
+              containerPort: 15672
+              protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            # rabbitmq_prometheus, enabled in the image. Declaring the port is
+            # what lets the Service publish it and the ServiceMonitor name it.
+            - name: prometheus
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          env:
+            # Username is non-secret and set directly from values
+            - name: RABBITMQ_DEFAULT_USER
+              value: {{ .Values.auth.username | quote }}
+            {{- if .Values.azureKeyVault.enabled }}
+            # Password comes from Key Vault via CSI-synced Secret
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rabbitmq.secretName" . }}
+                  key: rabbitmqPassword
+            {{- else }}
+            # Password comes from the pre-created existingSecret
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rabbitmq.secretName" . }}
+                  key: rabbitmq-password
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: amqp
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: amqp
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            {{- if and .Values.metrics.enabled .Values.metrics.perObjectMetrics }}
+            # subPath, so only this one file lands in conf.d. A directory mount
+            # would hide the entrypoint-written 10-defaults.conf and the broker
+            # would start with no configured user.
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq/conf.d/20-prometheus.conf
+              subPath: 20-prometheus.conf
+              readOnly: true
+            {{- end }}
+            {{- if .Values.azureKeyVault.enabled }}
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: rabbitmq-data
+          emptyDir: {}
+        {{- end }}
+        {{- if and .Values.metrics.enabled .Values.metrics.perObjectMetrics }}
+        - name: rabbitmq-config
+          configMap:
+            name: {{ include "rabbitmq.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.azureKeyVault.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.azureKeyVault.secretProviderClassName }}
+            {{- if eq .Values.azureKeyVault.authMode "servicePrincipal" }}
+            # servicePrincipal (on-prem, no OIDC issuer) ONLY. Under any other mode
+            # a nodePublishSecretRef makes the driver prefer the static credential
+            # and silently ignore the identity.
+            nodePublishSecretRef:
+              name: {{ .Values.azureKeyVault.credentialsSecretName | default "secrets-store-creds" }}
+            {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+        annotations:
+          # Two independent guards on the queue data, because losing it is not
+          # recoverable by re-syncing (finding M9 / H5). The StorageClass gives
+          # reclaimPolicy: Retain so the PV and its Azure disk survive PVC
+          # deletion; these stop ArgoCD and Helm from being the thing that deletes
+          # the PVC in the first place.
+          #
+          # Note StatefulSet volumeClaimTemplates are immutable: to resize, edit
+          # the PVC directly (the class allows expansion) — changing size here on
+          # an existing release is rejected by the API server.
+          argocd.argoproj.io/sync-options: Prune=false
+          helm.sh/resource-policy: keep
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

@@ -1,0 +1,54 @@
+# AppProject platform-hub-dev: the tenancy + RBAC boundary for the platform
+# components on hub-dev. appsets/platform-hub-dev.yaml puts every Application it generates
+# here.
+#
+# sync-wave -1: the root applies AppProjects before the ApplicationSets (wave 0);
+# the appset controller skips any Application whose project does not exist yet.
+#
+# DENY BY DEFAULT. Argo CD's global policy.default is role:readonly for logged-in
+# users, and the global policy.csv grants admin to argocd-admins only. The ONE
+# extra right on this cluster is the `developer` role below, bound to a Keycloak
+# group whose membership is managed in Keycloak, not here.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform-hub-dev
+  namespace: argocd-hub
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    app.kubernetes.io/part-of: platform
+spec:
+  description: Platform components on hub-dev
+  sourceRepos:
+    # Charts, at per-chart tags.
+    - https://dev.azure.com/example-org/platform/_git/org-platform
+    # This repo: the $values source of every Application.
+    - https://dev.azure.com/example-org/platform/_git/org-platform-gitops
+  destinations:
+    # This cluster only; platform components span many namespaces.
+    - server: https://kubernetes.default.svc
+      namespace: '*'
+  # Platform charts install cluster-scoped kinds (CRDs, ClusterIssuers, GatewayClass,
+  # ClusterRoles, StorageClasses, admission policies). On a hub that manages a fleet
+  # this stays '*'; the island, with one cluster and a known component list,
+  # enumerates them instead.
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  roles:
+    # Subject must be proj:platform-hub-dev:developer and object platform-hub-dev/*. One
+    # malformed line disables EVERY policy of this project (argocd-server logs
+    # "Failed to load casbin policies"); nothing validates it on sync.
+    - name: developer
+      description: Read, sync, resource actions (e.g. restart) and pod logs. No edit, delete or create.
+      groups:
+        - argocd-platform-hub-dev
+      policies:
+        - p, proj:platform-hub-dev:developer, applications, get, platform-hub-dev/*, allow
+        - p, proj:platform-hub-dev:developer, applications, sync, platform-hub-dev/*, allow
+        - p, proj:platform-hub-dev:developer, applications, action/*, platform-hub-dev/*, allow
+        - p, proj:platform-hub-dev:developer, logs, get, platform-hub-dev/*, allow

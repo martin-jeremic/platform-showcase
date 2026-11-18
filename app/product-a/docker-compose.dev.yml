@@ -1,0 +1,117 @@
+# Local development stack: every infrastructure dependency Product A needs, on a laptop, with no
+# shared environment involved.
+#
+#   docker compose -f docker-compose.dev.yml up -d --wait
+#   docker compose -f docker-compose.dev.yml down -v      # also drops the volumes
+#
+# CREDENTIALS: every one is a ${VAR:-default} whose default is an obvious dev-only placeholder.
+# Put real local values in an untracked .env next to this file (compose reads it automatically).
+# None of these values is used by, or valid in, any cluster environment.
+#
+# Ports: 5432 PostgreSQL | 5672/15672 RabbitMQ | 8085 Keycloak (/keycloak) | 8025 Mailpit UI
+#        10000 Azurite blob | 9200 Elasticsearch | 5035 API (dev image)
+
+name: product-a-dev
+
+x-healthcheck-defaults: &hc
+  interval: 10s
+  timeout: 5s
+  retries: 10
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: product_a
+      POSTGRES_USER: ${PG_USER:-product_a}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-dev-only-not-a-secret}
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d product_a"]
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-product_a}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-dev-only-not-a-secret}
+      RABBITMQ_DEFAULT_VHOST: product_a
+    ports: ["5672:5672", "15672:15672"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+
+  keycloak:
+    # Same /keycloak relative path as the cluster environments, so one issuer format works for both.
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-dev-only-not-a-secret}
+      KC_HTTP_RELATIVE_PATH: /keycloak
+      KC_HEALTH_ENABLED: "true"
+      # Management endpoints stay at the root of port 9000, independent of the relative path.
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+    ports: ["8085:8080"]
+    volumes:
+      # A realm export with no users and no client secrets (not included in the showcase).
+      - ./dev/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      <<: *hc
+      start_period: 60s
+      # The image ships no curl or wget: bash's /dev/tcp against the management port instead.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"UP\"' <&3"]
+
+  mailpit:
+    # Catches every mail the stack sends (Keycloak verification, invitations). UI on :8025.
+    image: axllent/mailpit:v1.24
+    ports: ["8025:8025"]
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.34.0
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--loose"]
+    ports: ["10000:10000"]
+    volumes:
+      - azurite_data:/data
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+      # Local only. Every cluster environment runs with security on.
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      <<: *hc
+      start_period: 60s
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health > /dev/null"]
+
+  api:
+    # `--target dev`: the production stage is chiseled and has no curl for this healthcheck.
+    build:
+      context: .
+      dockerfile: src/Api/Dockerfile
+      target: dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      # The same plain-JSON groups a cluster passes, pointed at this stack.
+      API: '{"Name":"product-a-api","Environment":"Dev"}'
+      MODULE: '{"BaseUrl":"http://host.docker.internal:8000"}'
+      DATABASE: '{"PostgresConnection":"Host=postgres;Port=5432;Database=product_a;Username=${PG_USER:-product_a};Password=${PG_PASSWORD:-dev-only-not-a-secret}"}'
+    ports: ["5035:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+
+volumes:
+  postgres_data:
+  azurite_data:
+  elasticsearch_data:

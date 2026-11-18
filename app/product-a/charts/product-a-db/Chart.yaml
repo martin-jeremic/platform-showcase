@@ -1,0 +1,8 @@
+apiVersion: v2
+name: product-a-db
+description: Schema migration / verification Job for Product A's database. Runs the product-a-api image.
+type: application
+# Packaged and pushed by the product-a-api CI run (secondHelmChartPath), at the SAME version as
+# product-a-api, so the two pins can never drift apart.
+version: 0.1.0
+appVersion: "0.1.0"

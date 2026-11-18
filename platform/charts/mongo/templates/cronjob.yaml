@@ -1,0 +1,235 @@
+{{- if .Values.backup.enabled }}
+{{- /*
+Refuse to render a backup that cannot work. A CronJob pointing at an empty storage account
+would be created, run on schedule, fail in a container log nobody reads, and report a
+green Application -- the exact shape of a backup everyone believes in until they need it.
+*/ -}}
+{{- if not .Values.backup.azure.accountName }}
+{{- fail "backup.enabled=true but backup.azure.accountName is empty -- set the storage account (and its credential) or leave backup.enabled=false" }}
+{{- end }}
+{{- if not .Values.backup.azure.containerName }}
+{{- fail "backup.enabled=true but backup.azure.containerName is empty -- the job does not create the container, it must already exist" }}
+{{- end }}
+{{- if not (has .Values.backup.azure.authMode (list "connectionString" "managedIdentity" "workloadIdentity")) }}
+{{- fail "backup.azure.authMode must be one of: connectionString, managedIdentity, workloadIdentity" }}
+{{- end }}
+{{- if and (eq .Values.backup.azure.authMode "workloadIdentity") (not (index .Values.backup.serviceAccount.annotations "azure.workload.identity/client-id")) }}
+{{- fail "backup.azure.authMode=workloadIdentity requires backup.serviceAccount.annotations[\"azure.workload.identity/client-id\"] to be set to the user-assigned managed identity's CLIENT id (from tofu)" }}
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mongo.fullname" . }}-backup
+  labels:
+    {{- include "mongo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  {{- with .Values.backup.timeZone }}
+  # Interpreted by the CronJob controller (k8s >= 1.27). Without this the schedule is UTC
+  # and DST would drift the run into the cluster's evening shutdown for half the year.
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: {{ .Values.backup.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ .Values.backup.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "mongo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backup
+    spec:
+      backoffLimit: {{ .Values.backup.backoffLimit }}
+      # Kills the pod outright, so a wedged dump cannot still be running when the node
+      # deallocates for the night.
+      activeDeadlineSeconds: {{ .Values.backup.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "mongo.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+            {{- if eq .Values.backup.azure.authMode "workloadIdentity" }}
+            # Without this label the mutating webhook projects no token and `az login`
+            # fails on a pod whose ServiceAccount looks correctly annotated.
+            azure.workload.identity/use: "true"
+            {{- end }}
+        spec:
+          serviceAccountName: {{ include "mongo.backupServiceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          # Step 1: dump. Runs as an initContainer so a failed dump means the uploader
+          # never starts -- there is no path where an empty or partial archive gets shipped
+          # and recorded as a successful backup.
+          initContainers:
+            - name: mongodump
+              image: {{ include "mongo.backupImage" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- with .Values.securityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              env:
+                - name: MONGO_HOST
+                  value: {{ printf "%s.%s.svc.cluster.local" (include "mongo.fullname" .) .Release.Namespace | quote }}
+                - name: MONGO_PORT
+                  value: {{ .Values.service.port | quote }}
+                - name: MONGO_USER
+                  value: {{ .Values.auth.username | quote }}
+                - name: MONGO_AUTHDB
+                  value: {{ .Values.auth.database | quote }}
+                - name: MONGO_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "mongo.secretName" . }}
+                      key: {{ include "mongo.passwordKey" . }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  ARCHIVE="/backup/{{ .Values.backup.azure.prefix }}mongo-${TS}.archive.gz"
+                  # Handed to the uploader, so both steps agree on the filename without
+                  # recomputing a timestamp that could straddle a minute boundary.
+                  printf '%s' "${ARCHIVE}" > /backup/.archive-path
+                  # The password goes through a 0600 config file on a memory-backed
+                  # emptyDir, NOT --password on argv, where it is readable in the
+                  # node's process list (/proc/<pid>/cmdline) for the whole dump.
+                  umask 077
+                  printf 'password: "%s"\n' "${MONGO_PASSWORD}" > /tmp/dump-config.yaml
+                  unset MONGO_PASSWORD
+                  echo ">> dumping ${MONGO_HOST}:${MONGO_PORT} -> ${ARCHIVE}"
+                  mongodump \
+                    --config=/tmp/dump-config.yaml \
+                    --host="${MONGO_HOST}" \
+                    --port="${MONGO_PORT}" \
+                    --username="${MONGO_USER}" \
+                    --authenticationDatabase="${MONGO_AUTHDB}" \
+                    --archive="${ARCHIVE}" \
+                    --gzip \
+                    {{- range .Values.backup.extraDumpArgs }}
+                    {{ . }} \
+                    {{- end }}
+                    --quiet
+                  # A zero-length archive means mongodump exited 0 having written nothing.
+                  # Catch it here rather than discovering it during a restore.
+                  if [ ! -s "${ARCHIVE}" ]; then
+                    echo "!! dump produced an empty archive: ${ARCHIVE}" >&2
+                    exit 1
+                  fi
+                  echo ">> dump complete: $(ls -lh "${ARCHIVE}" | awk '{print $5}')"
+              volumeMounts:
+                - name: scratch
+                  mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+
+          # Step 2: upload, then the pod exits and the Job is Complete.
+          containers:
+            - name: upload
+              image: {{ .Values.backup.azureCliImage | quote }}
+              imagePullPolicy: IfNotPresent
+              {{- with .Values.securityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              env:
+                - name: AZURE_STORAGE_ACCOUNT
+                  value: {{ .Values.backup.azure.accountName | quote }}
+                - name: AZURE_BLOB_CONTAINER
+                  value: {{ .Values.backup.azure.containerName | quote }}
+                {{- if eq .Values.backup.azure.authMode "connectionString" }}
+                # az reads this env var directly; no --account-name/--account-key on argv,
+                # so the credential never appears in a process list or a job log.
+                - name: AZURE_STORAGE_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "mongo.secretName" . }}
+                      key: {{ include "mongo.blobConnectionStringKey" . }}
+                {{- end }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  ARCHIVE="$(cat /backup/.archive-path)"
+                  if [ ! -s "${ARCHIVE}" ]; then
+                    echo "!! no archive to upload at ${ARCHIVE}" >&2
+                    exit 1
+                  fi
+                  {{- if eq .Values.backup.azure.authMode "workloadIdentity" }}
+                  # AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_FEDERATED_TOKEN_FILE are
+                  # injected by the workload-identity webhook because the SA is annotated
+                  # AND this pod carries azure.workload.identity/use=true. If any is unset,
+                  # the webhook did not fire -- check both halves before debugging Azure.
+                  : "${AZURE_CLIENT_ID:?workload identity env not injected -- is the pod missing the azure.workload.identity/use label?}"
+                  : "${AZURE_FEDERATED_TOKEN_FILE:?workload identity env not injected -- is the ServiceAccount missing the client-id annotation?}"
+                  echo ">> az login (workload identity, client ${AZURE_CLIENT_ID})"
+                  az login --service-principal \
+                    --username "${AZURE_CLIENT_ID}" \
+                    --tenant "${AZURE_TENANT_ID}" \
+                    --federated-token "$(cat "${AZURE_FEDERATED_TOKEN_FILE}")" \
+                    --allow-no-subscriptions >/dev/null
+                  AUTH_ARGS="--auth-mode login --account-name ${AZURE_STORAGE_ACCOUNT}"
+                  {{- else if eq .Values.backup.azure.authMode "managedIdentity" }}
+                  echo ">> az login --identity (kubelet managed identity)"
+                  az login --identity --allow-no-subscriptions >/dev/null
+                  AUTH_ARGS="--auth-mode login --account-name ${AZURE_STORAGE_ACCOUNT}"
+                  {{- else }}
+                  # Account comes from the connection string; passing --account-name too
+                  # makes az error on conflicting sources. Cross-check that the string
+                  # actually points where accountName claims, so a typo cannot make the
+                  # job log name one account while uploading to another.
+                  CS_ACCT="$(printf '%s' "${AZURE_STORAGE_CONNECTION_STRING}" | tr ';' '\n' | sed -n 's/^AccountName=//p')"
+                  if [ -n "${CS_ACCT}" ] && [ "${CS_ACCT}" != "${AZURE_STORAGE_ACCOUNT}" ]; then
+                    echo "!! connection string points at '${CS_ACCT}' but backup.azure.accountName is '${AZURE_STORAGE_ACCOUNT}'" >&2
+                    exit 1
+                  fi
+                  AUTH_ARGS=""
+                  {{- end }}
+                  echo ">> uploading $(basename "${ARCHIVE}") -> ${AZURE_STORAGE_ACCOUNT}/${AZURE_BLOB_CONTAINER}"
+                  # --overwrite false: a re-run can never clobber an existing archive.
+                  az storage blob upload \
+                    --container-name "${AZURE_BLOB_CONTAINER}" \
+                    --name "$(basename "${ARCHIVE}")" \
+                    --file "${ARCHIVE}" \
+                    --overwrite false \
+                    --only-show-errors \
+                    ${AUTH_ARGS}
+                  echo ">> upload complete"
+              volumeMounts:
+                - name: scratch
+                  mountPath: /backup
+                  readOnly: true
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+
+          volumes:
+            # Scratch only -- the archive exists for the life of this pod and no longer.
+            # Nothing is written to the mongo data PVC, so a backup can never compete with
+            # mongod for space on the managed disk.
+            - name: scratch
+              emptyDir:
+                sizeLimit: {{ .Values.backup.scratchSizeLimit }}
+            # Holds only the dump's config file (the password); memory-backed, gone
+            # with the pod.
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 1Mi
+{{- end }}

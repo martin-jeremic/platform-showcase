@@ -1,0 +1,34 @@
+# payments-api CD (company GitOps promote). Register as `payments-api-cd`.
+#
+# Never rebuilds and never touches a cluster. It writes gitops descriptors; Argo CD deploys.
+#   Promote_Dev       apps/payments-api/dev/       digest from this CI run's deploy-meta artifact
+#   Promote_Services  apps/payments-api/services/  copies the dev digest EXACTLY, after an approval
+#                     on the ADO `Production` environment (set-environment-approvals.sh)
+# So production runs byte-for-byte what dev ran, and only after a human said so.
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+    # Declared so the job token may push to it ("Protect access to repositories" is on).
+    - repository: gitops
+      type: git
+      name: platform/services-gitops
+  pipelines:
+    - pipeline: ci
+      source: payments-api-ci
+      trigger:
+        branches:
+          include:
+            - main
+
+stages:
+  - template: stages/promote-stage.yml@templates
+    parameters:
+      apps:
+        - payments-api
+      metaPipelineAlias: ci

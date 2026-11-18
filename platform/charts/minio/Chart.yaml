@@ -1,0 +1,19 @@
+apiVersion: v2
+name: minio
+description: >
+  MinIO object storage (upstream chart) with Traefik Gateway API routing for the
+  console and the S3 API under path prefixes. Kept minimal: a placeholder
+  component, not deployed on any cluster today.
+type: application
+version: 0.2.0
+appVersion: "RELEASE.2025-04-22T22-12-26Z"
+keywords:
+  - minio
+  - s3
+  - gateway-api
+# 0.2.0 -- subchart pinned exactly (was ^5.0.0); root credentials only from a
+#   pre-created Secret (was a rootPassword value with a REPLACE_WITH_ placeholder).
+dependencies:
+  - name: minio
+    version: "5.4.0"
+    repository: https://charts.min.io/

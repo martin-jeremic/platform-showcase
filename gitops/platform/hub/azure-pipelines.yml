@@ -1,0 +1,71 @@
+# CI for the hub gitops repo (org-platform-gitops). The original repo had NONE: a
+# descriptor typo or a values file that broke a chart guard was found by Argo, after
+# the merge, as a ComparisonError -- and a missing descriptor field breaks
+# generation for EVERY component of that cluster at once (missingkey=error).
+#
+# Three checks, none of which needs cluster access or an Azure credential:
+#   1. component.sh validate -- every descriptor has every field the appset reads,
+#      a tag-shaped chartRevision, a values file, and a catalog entry.
+#   2. Every descriptor rendered the way Argo renders it: the chart AT ITS PINNED
+#      TAG + values.yaml + platform/values/<cluster>/<component>.yaml, under the
+#      descriptor's release name and namespace. A tag that does not exist fails
+#      here instead of as a ComparisonError.
+#   3. The root app's render (argocd/) builds, and NOTHING from argocd/setup/ is in
+#      it: a pruned repository credential cannot be recovered by Argo.
+#
+# Gates nothing until it is a Build Validation branch policy on main (Azure Repos
+# ignores YAML `pr:` triggers).
+trigger:
+  branches:
+    include:
+      - main
+
+resources:
+  repositories:
+    # The charts, with every tag (the descriptors pin tags).
+    - repository: charts
+      type: git
+      name: platform/org-platform
+      ref: refs/heads/main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  helmVersion: 'v3.17.2'
+  GITOPS_DIR: $(Build.SourcesDirectory)/org-platform-gitops
+  CHARTS_DIR: $(Build.SourcesDirectory)/org-platform
+
+steps:
+  - checkout: self
+  - checkout: charts
+    fetchDepth: 0
+    fetchTags: true
+
+  - task: HelmInstaller@1
+    inputs:
+      helmVersionToInstall: $(helmVersion)
+
+  - script: sh platform/component.sh validate
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Descriptors: fields, tag pins, values files, catalog'
+
+  - script: bash platform/render-descriptors.sh "$CHARTS_DIR"
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Render every descriptor at its pinned tag with its values'
+
+  - script: |
+      set -euo pipefail
+      kubectl kustomize argocd/ > "$AGENT_TEMPDIRECTORY/root.yaml"
+      grep -q '^kind: AppProject$'     "$AGENT_TEMPDIRECTORY/root.yaml"
+      grep -q '^kind: ApplicationSet$' "$AGENT_TEMPDIRECTORY/root.yaml"
+      # Nothing from setup/ may ever be rendered by the root app. Checked on the
+      # RENDER (kinds and names), not on the kustomization's text, so an include by
+      # any route -- a nested kustomization, a glob -- is caught too.
+      if grep -nE '^kind: Secret$|secret-type: (repo-creds|repository|cluster)|secrets-store-creds' "$AGENT_TEMPDIRECTORY/root.yaml"; then
+        echo "FAIL: a file from argocd/setup/ is rendered by the root app -- see argocd/setup/README.md"
+        exit 1
+      fi
+      echo "argocd/ renders $(grep -c '^kind:' "$AGENT_TEMPDIRECTORY/root.yaml") objects; setup/ correctly excluded"
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Root app builds; nothing from setup/'

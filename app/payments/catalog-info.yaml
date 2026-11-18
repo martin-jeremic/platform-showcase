@@ -1,0 +1,88 @@
+# One Component per DEPLOYABLE (= image repo = OCI chart name = gitops/services app folder = CI
+# pipeline). The shared projects (Domain, Contracts, provider adapters) are compiled into these and
+# have no entity of their own: the catalog describes what runs, not how the code is split.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: payments-api
+  title: Payments API
+  description: Checkout, orchestration, operator admin API and outbound webhooks.
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: platform/payments
+    dev.azure.com/build-definition: payments-api-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/platform/_git/payments?path=/src/Api
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=payments-api
+    argocd/app-selector: example.com/service=payments-api
+spec:
+  type: service
+  lifecycle: production
+  owner: payments-team
+  system: payments
+  dependsOn:
+    - resource:psql-org
+    - component:rabbitmq
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: payments-invoicing
+  title: Payments invoicing
+  description: Issues invoices to the national e-invoicing service and renders invoice PDFs.
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: platform/payments
+    dev.azure.com/build-definition: payments-invoicing-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/platform/_git/payments?path=/src/Invoicing
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=payments-invoicing
+    argocd/app-selector: example.com/service=payments-invoicing
+spec:
+  type: service
+  lifecycle: production
+  owner: payments-team
+  system: payments
+  dependsOn:
+    - resource:psql-org
+    - component:rabbitmq
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: payments-email
+  title: Payments email worker
+  description: Delivers transactional mail from broker commands. No HTTP surface.
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: platform/payments
+    dev.azure.com/build-definition: payments-email-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/platform/_git/payments?path=/src/Email
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=payments-email
+    argocd/app-selector: example.com/service=payments-email
+spec:
+  type: service
+  lifecycle: production
+  owner: payments-team
+  system: payments
+  dependsOn:
+    - component:rabbitmq
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: payments-admin-web
+  title: Payments admin web
+  description: Operator SPA under /pay-admin; nginx proxies /pay-admin/api to payments-api (single origin).
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: platform/payments
+    dev.azure.com/build-definition: payments-admin-web-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/platform/_git/payments?path=/src/AdminWeb
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=payments-admin-web
+    argocd/app-selector: example.com/service=payments-admin-web
+spec:
+  type: website
+  lifecycle: production
+  owner: payments-team
+  system: payments
+  dependsOn:
+    - component:payments-api

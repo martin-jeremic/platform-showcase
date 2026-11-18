@@ -1,0 +1,165 @@
+# steps/trivy-scan-steps.yml
+#
+# Trivy scan, WARN-ONLY by decision, in one of two modes:
+#
+#   scanType: image  CI record of what ships. Scans <acr>/<imageName>@<digest> (the digest of
+#                    imageName:version) for CRITICAL+HIGH vulnerabilities that have a fix, plus
+#                    secrets baked into layers. Trivy pulls the layers itself: no Docker daemon.
+#   scanType: fs     PR gate before merge. Scans scanPath for vulnerable dependencies, secrets
+#                    and IaC/Dockerfile misconfiguration.
+#
+# Why warn-only: the image scan sits between the build and the digest record, and the dev CD is
+# started by this pipeline's completion trigger, which Azure DevOps documents as firing on
+# SUCCESSFUL runs. A failing scan (or even SucceededWithIssues) would therefore silently stop
+# dev deployments. So findings are made visible without opening the log instead:
+#   - a warning on the run summary,
+#   - the run tag `trivy-findings` (filterable in the runs list),
+#   - one failed test per finding in the Tests tab (failTaskOnFailedTests: false),
+#   - a "trivy" summary on the Extensions tab and the JSON report as an artifact.
+# The blocking gates are elsewhere: gitleaks in convention-checks-stage.yml blocks secrets.
+#
+# In image mode the digest lookup and the registry token come from their OWN AzureCLI@2 task, for
+# the same reason the build and the record are split in build-or-promote-stage.yml: it gets a
+# fresh 10-minute workload-identity assertion whatever the build's wall time was.
+
+parameters:
+  - name: scanType
+    type: string
+    default: image
+    values: [image, fs]
+  # image mode
+  - name: imageName
+    type: string
+    default: ''
+  - name: version
+    type: string
+    default: ''
+  - name: acrName
+    type: string
+    default: ''
+  - name: armServiceConnection
+    type: string
+    default: ''
+  # fs mode
+  - name: scanPath
+    type: string
+    default: '.'
+  # Name used for the report files, the artifact and the Tests tab title.
+  - name: reportName
+    type: string
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - template: trivy-install-steps.yml
+    parameters:
+      condition: ${{ parameters.condition }}
+
+  - ${{ if eq(parameters.scanType, 'image') }}:
+    - task: AzureCLI@2
+      displayName: Resolve image + registry token for the scan
+      condition: ${{ parameters.condition }}
+      env:
+        ACR_NAME: ${{ parameters.acrName }}
+        IMAGE: ${{ parameters.imageName }}
+        VERSION: ${{ parameters.version }}
+      inputs:
+        azureSubscription: ${{ parameters.armServiceConnection }}
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          not_scanned() { echo "##vso[task.logissue type=warning]$IMAGE:$VERSION will NOT be scanned: $1"; exit 0; }
+          # A missing digest is reported (and fails the run) by the record step; here it only
+          # means there is nothing to scan.
+          DIGEST="$(az acr repository show --name "$ACR_NAME" --image "$IMAGE:$VERSION" --query digest -o tsv)" \
+            || not_scanned "could not resolve the digest."
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || not_scanned "no valid digest (got: '$DIGEST')."
+          # ACR accepts its access token as the password of the all-zero user, the same login
+          # helm uses for the OCI chart push.
+          TOKEN="$(az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv)" \
+            || not_scanned "could not get a registry access token."
+          echo "##vso[task.setvariable variable=trivyTarget]$ACR_NAME.azurecr.io/$IMAGE@$DIGEST"
+          echo "##vso[task.setvariable variable=trivyRegistryToken;issecret=true]$TOKEN"
+
+  - bash: |
+      set -euo pipefail
+      TRIVY="${TRIVYDIR:-}/trivy"
+      not_scanned() { echo "##vso[task.logissue type=warning]$REPORT_NAME was NOT scanned: $1"; exit 0; }
+      [ -n "${TRIVYDIR:-}" ] && [ -x "$TRIVY" ] || not_scanned "Trivy is not installed (see the install step)."
+
+      OUT="$AGENT_TEMPDIRECTORY/trivy-report"
+      mkdir -p "$OUT"
+      JSON="$OUT/$REPORT_NAME.json"
+      TXT="$OUT/$REPORT_NAME.txt"
+      COMMON=(--cache-dir "$AGENT_TOOLSDIRECTORY/trivy-cache" --severity CRITICAL,HIGH --ignore-unfixed --format json --output "$JSON")
+
+      if [ "$SCAN_TYPE" = "image" ]; then
+        # An unset pipeline variable reaches the script as the literal text "$(trivyTarget)".
+        case "${TARGET:-}" in ''|'$('*) not_scanned "no image reference was resolved (see the step above)." ;; esac
+        export TRIVY_USERNAME="00000000-0000-0000-0000-000000000000"
+        export TRIVY_PASSWORD="$REGISTRY_TOKEN"
+        "$TRIVY" image "${COMMON[@]}" --scanners vuln,secret "$TARGET" \
+          || not_scanned "Trivy exited with an error (output above)."
+      else
+        TARGET="$SCAN_PATH"
+        "$TRIVY" fs "${COMMON[@]}" --scanners vuln,secret,misconfig "$TARGET" \
+          || not_scanned "Trivy exited with an error (output above)."
+      fi
+      "$TRIVY" convert --format table --output "$TXT" "$JSON" \
+        || echo "(table rendering failed; the JSON artifact is complete)" > "$TXT"
+      cat "$TXT"
+
+      # awk, not `grep -c` or `grep | wc -l`: grep exits 1 on zero matches, which set -e plus
+      # pipefail turn into a FAILED step on every clean report, i.e. exactly when nothing is wrong.
+      VULNS="$(awk '/"VulnerabilityID"/ { n++ } END { print n + 0 }' "$JSON")"
+      SECRETS="$(awk '/"RuleID"/ { n++ } END { print n + 0 }' "$JSON")"
+      MISCONF="$(awk '/"AVDID"/ { n++ } END { print n + 0 }' "$JSON")"
+
+      if [ "$VULNS" -gt 0 ] || [ "$SECRETS" -gt 0 ] || [ "$MISCONF" -gt 0 ]; then
+        echo "##vso[task.logissue type=warning]$REPORT_NAME: $VULNS fixable CRITICAL/HIGH vulnerabilities, $SECRETS secret finding(s), $MISCONF misconfiguration(s). See the Tests tab, the 'trivy' summary and the trivy-$REPORT_NAME artifact."
+        echo "##vso[build.addbuildtag]trivy-findings"
+        if "$TRIVY" convert --format template --template "@$TRIVYDIR/contrib/junit.tpl" \
+             --output "$OUT/$REPORT_NAME.junit.xml" "$JSON"; then
+          echo "##vso[task.setvariable variable=trivyJunit]true"
+        else
+          echo "##vso[task.logissue type=warning]Findings could not be written as test results; see the 'trivy' summary."
+        fi
+      else
+        echo "$REPORT_NAME: no fixable CRITICAL/HIGH vulnerabilities, no secrets, no misconfigurations."
+      fi
+
+      SUMMARY="$OUT/trivy-$REPORT_NAME.md"
+      {
+        echo "### Trivy ($SCAN_TYPE): \`$TARGET\`"
+        echo
+        echo "$VULNS fixable CRITICAL/HIGH vulnerabilities, $SECRETS secret finding(s), $MISCONF misconfiguration(s)."
+        echo
+        echo '```'
+        cat "$TXT"
+        echo '```'
+      } > "$SUMMARY"
+      echo "##vso[task.uploadsummary]$SUMMARY"
+      echo "##vso[artifact.upload containerfolder=trivy;artifactname=trivy-$REPORT_NAME]$JSON"
+    displayName: Trivy scan (${{ parameters.scanType }}, warn-only)
+    condition: ${{ parameters.condition }}
+    env:
+      SCAN_TYPE: ${{ parameters.scanType }}
+      SCAN_PATH: ${{ parameters.scanPath }}
+      REPORT_NAME: ${{ parameters.reportName }}
+      TARGET: $(trivyTarget)
+      # Secret variables are never exposed to scripts implicitly; this mapping is deliberate.
+      REGISTRY_TOKEN: $(trivyRegistryToken)
+
+  # Failed tests here do not fail the task, so the run stays green; they exist to make the
+  # findings visible in the Tests tab and on the run summary.
+  - task: PublishTestResults@2
+    displayName: Publish Trivy findings as test results
+    condition: and(succeededOrFailed(), eq(variables['trivyJunit'], 'true'))
+    inputs:
+      testResultsFormat: JUnit
+      searchFolder: $(Agent.TempDirectory)/trivy-report
+      testResultsFiles: '${{ parameters.reportName }}.junit.xml'
+      testRunTitle: 'Trivy (${{ parameters.scanType }}): ${{ parameters.reportName }}'
+      failTaskOnFailedTests: false

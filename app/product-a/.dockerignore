@@ -1,0 +1,68 @@
+# Root .dockerignore for monorepo builds. Every service image is built with the monorepo root as
+# context (`docker build -f src/<svc>/Dockerfile .`, or `az acr build` with buildContext '.'),
+# because the images reach shared code next to the service folder. This file keeps the upload
+# tarball small: without it `az acr build` uploads every node_modules and bin/ folder in the repo.
+
+# VCS and editors
+.git
+**/.gitignore
+**/.gitattributes
+**/.vs
+**/.vscode
+**/.idea
+**/*.user
+
+# Docs are never runtime. Note: the shared Python runtime's pyproject.toml must not reference
+# README.md for exactly this reason (it would be missing from the context).
+docs
+**/README.md
+**/CHANGELOG.md
+
+# .NET build output
+**/bin
+**/obj
+**/TestResults
+
+# Node / Angular
+**/node_modules
+**/.nx
+**/.angular
+**/dist
+
+# Python
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.pytest_cache
+
+# Docker / compose meta
+**/Dockerfile
+**/Dockerfile.*
+**/docker-compose*
+**/.dockerignore
+
+# Local secrets and overrides: never in an image
+**/.env
+**/.env.*
+**/appsettings.Development.json
+
+# --- Python services: per-folder rules, ANCHORED on purpose ----------------------------------
+# A Python Dockerfile COPYs its whole service folder, so non-runtime files there must be listed.
+# They are anchored to the folder instead of written as `**/test_*.py`, because `az acr build`
+# turns a leading `**/` into a bare `.*`: the unanchored pattern would also drop any runtime module
+# whose file name merely CONTAINS "test_" (latest_rates.py, say), and the image would fail at
+# import time in the cluster, not at build time.
+src/module/test_*.py
+src/module/conftest.py
+src/module/tests
+src/module/helm
+src/module/pipelines
+
+# Charts and pipelines are deployed separately and never belong in an image.
+charts
+pipelines
+src/Api/helm
+src/web/helm
+
+# The web SPA builds from its own folder as context, never from the root.
+src/web

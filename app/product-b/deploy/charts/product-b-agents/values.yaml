@@ -1,0 +1,37 @@
+# product-b-agents: the AI workflow layer (Python). It proposes, drafts and explains by calling the
+# domain's own tools on product-b-mcp; it never touches the database, the broker or storage.
+#
+# By construction it holds NO database, broker or storage credential, and the image carries none.
+# Its whole configuration is the three ConfigMap keys below plus ONE secret: its own Keycloak
+# client secret, used to get a token for the API. Delete this chart and the product still ships.
+
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  repository: productacr.azurecr.io/product-b-agents
+  digest: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 8000
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 192Mi
+  limits:
+    memory: 384Mi
+
+config:
+  mcpBaseUrl: ""      # required: http://product-b-mcp
+  defaultTenant: ""   # required
+  # DEBUG | INFO | WARNING | ERROR. The format is not configurable: JSON lines on the shared contract.
+  logLevel: INFO
+
+keycloakClient:
+  # Realm product-b-dev, confidential client product-b-agents (client-credentials grant).
+  clientId: product-b-agents
+  # Key Vault-synced Secret holding the client secret, key KeycloakClientSecret.
+  secretName: product-b-agents-secrets

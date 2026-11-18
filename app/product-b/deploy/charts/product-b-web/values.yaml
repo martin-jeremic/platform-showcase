@@ -1,0 +1,35 @@
+# product-b-web: workbench + driver app (nginx, deploy/web/nginx.conf).
+
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  repository: productacr.azurecr.io/product-b-web
+  digest: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 8080
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+configMap:
+  # The gateway path prefix, with leading AND trailing slash ("/" for none). nginx rewrites each
+  # index.html's <base href> to it at runtime, so the same image serves any prefix.
+  basePath: ""
+  # window.__env for both apps. The production build refuses to start without apiBaseUrl,
+  # oidcIssuer and oidcClientId, so the chart refuses to render without the block.
+  envJs: ""
+
+gateway:
+  name: gateway
+  namespace: traefik
+route:
+  enabled: false
+  hostnames: []

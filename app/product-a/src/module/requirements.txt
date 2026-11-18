@@ -1,0 +1,7 @@
+# Exact pins: the image is rebuilt from this file, and a floating range would make two builds of
+# the same commit differ. producta-runtime is NOT listed: the Dockerfile installs it from the
+# monorepo path (shared/python-runtime), after these, so an edit there does not re-resolve them.
+fastapi==0.115.6
+gunicorn==23.0.0
+uvicorn==0.34.0
+uvicorn-worker==0.3.0

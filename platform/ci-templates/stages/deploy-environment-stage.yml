@@ -1,0 +1,134 @@
+# stages/deploy-environment-stage.yml
+#
+# Push-based deploy (dev only): `helm upgrade --install` of the app chart from the registry, BY
+# DIGEST. Used where an environment is not (yet) GitOps-managed: product-a dev and product-b.
+#
+# A tag is a moving pointer; a digest is the artifact. Two builds can wear the same tag; they
+# cannot share a digest. CI already resolves the digest; the first version of this template
+# never passed it down, so image.digest stayed at its empty default and dev ran "whatever the
+# tag pointed at when the node pulled". Here the digest is REQUIRED: no digest, no deploy.
+#
+# Secrets do not travel through the pipeline. The earlier template fetched Key Vault secrets with
+# AzureKeyVault@2 and wrote them into a temporary values file for `--values`; the charts now read
+# them in-cluster through the Secrets Store CSI driver (same as the GitOps environments), so the
+# pipeline only ever handles non-secret values.
+#
+# Order in a CD pipeline: refuse-placeholders-stage -> migration-deploy-stage (if the service has
+# a Job chart) -> this stage, each depending on the previous one. When passing `condition`, keep
+# succeeded() in it: a custom stage condition REPLACES the implicit one, and without it a failed
+# migration stage did not stop the app deploy.
+
+parameters:
+  - name: stageName
+    type: string
+    default: Deploy_Dev
+  - name: dependsOn
+    type: object
+    default: []
+  - name: condition
+    type: string
+    default: succeeded()
+  - name: environmentName
+    type: string
+    default: Development
+  - name: namespace
+    type: string
+  - name: chartName
+    type: string
+  - name: releaseName
+    type: string
+    default: ''
+  - name: imageName
+    type: string
+  # chart version == image tag (both stamped by CI with the same version).
+  - name: version
+    type: string
+  # Env values file in the service repo, relative to the repo root.
+  - name: valuesFile
+    type: string
+    default: ''
+  - name: helmTimeout
+    type: string
+    default: 10m
+  - name: acrName
+    type: string
+    default: productacr
+  - name: armServiceConnection
+    type: string
+    default: arm-product-a
+  - name: helmVersion
+    type: string
+    default: '4.2.0'
+  - name: pool
+    type: object
+    default:
+      name: Default
+      demands: [dev-deploy]
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Deploy ${{ coalesce(parameters.releaseName, parameters.chartName) }} (${{ parameters.environmentName }})
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    jobs:
+      - deployment: Deploy
+        displayName: helm upgrade by digest
+        environment: ${{ parameters.environmentName }}
+        pool: ${{ parameters.pool }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - ${{ if ne(parameters.valuesFile, '') }}:
+                  - checkout: self
+                    fetchDepth: 1
+                - ${{ else }}:
+                  - checkout: none
+
+                - task: HelmInstaller@1
+                  displayName: Install Helm ${{ parameters.helmVersion }}
+                  inputs:
+                    helmVersionToInstall: ${{ parameters.helmVersion }}
+
+                - task: AzureCLI@2
+                  displayName: Resolve digest + helm upgrade
+                  env:
+                    ACR_NAME: ${{ parameters.acrName }}
+                    IMAGE: ${{ parameters.imageName }}
+                    VERSION: ${{ parameters.version }}
+                    CHART: ${{ parameters.chartName }}
+                    RELEASE: ${{ coalesce(parameters.releaseName, parameters.chartName) }}
+                    NAMESPACE: ${{ parameters.namespace }}
+                    VALUES_FILE: ${{ parameters.valuesFile }}
+                    HELM_TIMEOUT: ${{ parameters.helmTimeout }}
+                  inputs:
+                    azureSubscription: ${{ parameters.armServiceConnection }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      # No "latest" fallback: a mutable tag makes the deploy unreproducible.
+                      [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]No version resolved from the CI run."; exit 1; }
+                      REGISTRY="$ACR_NAME.azurecr.io"
+                      DIGEST="$(az acr repository show --name "$ACR_NAME" --image "$IMAGE:$VERSION" --query digest -o tsv 2>/dev/null || true)"
+                      [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "##vso[task.logissue type=error]No digest for $IMAGE:$VERSION; refusing to deploy by tag."; exit 1; }
+
+                      az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv \
+                        | helm registry login "$REGISTRY" --username 00000000-0000-0000-0000-000000000000 --password-stdin
+
+                      ARGS=(--namespace "$NAMESPACE" --create-namespace
+                            --version "$VERSION"
+                            --set-string "image.repository=$REGISTRY/$IMAGE"
+                            --set-string "image.tag=$VERSION"
+                            --set-string "image.digest=$DIGEST"
+                            --wait --timeout "$HELM_TIMEOUT")
+                      [ -z "$VALUES_FILE" ] || ARGS+=(--values "$BUILD_SOURCESDIRECTORY/$VALUES_FILE")
+                      helm upgrade --install "$RELEASE" "oci://$REGISTRY/helm/$CHART" "${ARGS[@]}"
+                      echo "Deployed $RELEASE $VERSION @ $DIGEST to $NAMESPACE"
+
+                - bash: kubectl get deploy,pods,svc,httproute -n "$NAMESPACE" -l "app.kubernetes.io/instance=$RELEASE"
+                  displayName: Show what is running
+                  condition: always()
+                  env:
+                    NAMESPACE: ${{ parameters.namespace }}
+                    RELEASE: ${{ coalesce(parameters.releaseName, parameters.chartName) }}

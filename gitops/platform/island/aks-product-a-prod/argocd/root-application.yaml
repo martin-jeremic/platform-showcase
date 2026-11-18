@@ -1,0 +1,36 @@
+# App-of-apps root. Apply this ONE manifest by hand, once, AFTER setup/:
+#   kubectl -n argocd apply -f argocd/root-application.yaml
+#
+# It renders argocd/ through kustomization.yaml: the AppProject, the ApplicationSet
+# and the dashboards Application. The ApplicationSet then generates one Application
+# per descriptor under platform/aks-product-a-prod/. Adding a component is adding a
+# descriptor; this file never grows.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # 'default', not 'product-a-platform'. The root creates an AppProject and an
+  # ApplicationSet in the argocd namespace -- argoproj.io kinds on the cluster Argo
+  # runs on. The restricted project does not whitelist those, and should not:
+  # widening it so the root fits would defeat the point of scoping it.
+  project: default
+  source:
+    repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-platform-gitops
+    targetRevision: main
+    path: argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Safe HERE, unlike on the argocd component: this app owns only the AppProject,
+      # the ApplicationSet and one Application -- pruning them never touches the
+      # running controller.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

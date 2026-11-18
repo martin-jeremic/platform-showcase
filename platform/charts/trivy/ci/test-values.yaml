@@ -1,0 +1,11 @@
+# CI values: aks-org-prod -- own Prometheus, scan jobs pull with workload identity.
+trivy-operator:
+  serviceMonitor:
+    enabled: true
+  operator:
+    scanJobsConcurrentLimit: 2
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+  trivyOperator:
+    scanJobPodTemplateLabels: "azure.workload.identity/use=true"

@@ -1,0 +1,140 @@
+---
+# Backstage software catalog: entry point of the product-a monorepo.
+#
+# Every deployable has a descriptor in catalog/<name>.yaml, listed by the Location below; each
+# entity's backstage.io/source-location points at its folder.
+#
+# The descriptors are deliberately NOT inside the service folders. Every service pipeline triggers
+# on src/<svc>/** (and shared folders fan out to several services), so a catalog edit there would
+# rebuild and redeploy services. No pipeline path filter matches the repository root or catalog/.
+#
+# This file also holds what belongs to the repository as a whole: the shared resources the services
+# use (database, broker, blob storage, identity, secret store) and the external services the code
+# calls. The per-environment instances behind them are described by the infrastructure repos.
+# Relations follow the code: spec.dependsOn lists what a component calls or reads at run time.
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: product-a-monorepo
+  description: Per-deployable catalog descriptors of the product-a monorepo
+spec:
+  targets:
+    - ./catalog/product-a-api.yaml
+    - ./catalog/product-a-module.yaml
+    - ./catalog/product-a-web.yaml
+    - ./catalog/product-a-referencedata.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: product-a
+  title: Product A
+  description: AI logistics SaaS - document intake, LLM extraction, operator review.
+spec:
+  owner: product-a-team
+---
+# --- Shared application resources --------------------------------------------------------------
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: product-a-database
+  title: PostgreSQL database "product_a"
+  description: >-
+    The shared application database. Isolation is by schema and role, not by database: a platform
+    schema, a reference-data schema, and one schema per tenant created from a template.
+  tags: [postgresql]
+spec:
+  type: database
+  owner: product-a-team
+  system: product-a
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: product-a-audit-database
+  title: PostgreSQL database "product_a_audit"
+  description: >-
+    Dedicated audit database: one schema per tenant, append-only, each row chained to the previous
+    one by a SHA-256 hash, written through least-privilege provisioner and writer logins.
+  tags: [postgresql]
+spec:
+  type: database
+  owner: product-a-team
+  system: product-a
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: product-a-message-bus
+  title: RabbitMQ message bus
+  description: Intake events between the ingest worker and the platform API (.NET services only).
+  tags: [rabbitmq]
+spec:
+  type: message-broker
+  owner: product-a-team
+  system: product-a
+  dependsOn:
+    - component:rabbitmq
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: product-a-blob-storage
+  title: Application blob storage
+  description: Per-tenant containers for raw and processed documents. Azurite on the on-prem stage.
+  tags: [azure-blob]
+spec:
+  type: storage
+  owner: product-a-team
+  system: product-a
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: product-a-identity
+  title: Keycloak realms
+  description: >-
+    Users (OIDC) and services (client credentials). One realm per environment (product-a-dev,
+    product-a-stage, product-a-demo, product-a), configured as code in the infrastructure repo.
+  tags: [keycloak, oidc]
+spec:
+  type: identity-provider
+  owner: product-a-team
+  system: product-a
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: product-a-key-vault
+  title: Application secrets (Key Vault)
+  description: >-
+    One vault per environment (kv-product-a-<env>), objects named <app>--secret--<key>, each holding
+    plain JSON. Charts read them through the Secrets Store CSI driver with workload identity.
+  tags: [azure-key-vault]
+spec:
+  type: secret-store
+  owner: product-a-team
+  system: product-a
+---
+# --- External services called by the code ------------------------------------------------------
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: llm-product-a
+  title: LLM deployment (foundry-product-a)
+  description: Hosted model deployments (gpt-4o, gpt-5-mini) used by the analysis modules.
+spec:
+  type: external-service
+  owner: product-a-team
+  system: product-a
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: tenant-tms-endpoints
+  title: Tenant TMS endpoints
+  description: Per-tenant webhook or SFTP endpoints that receive the structured output.
+spec:
+  type: external-service
+  owner: product-a-team
+  system: product-a

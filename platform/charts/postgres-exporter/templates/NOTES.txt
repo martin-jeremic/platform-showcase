@@ -1,0 +1,25 @@
+postgres_exporter is running in your cluster.
+
+It observes an EXTERNAL server — nothing about the database runs here:
+  {{ .Values.datasource.uri }}
+  as role: {{ .Values.datasource.user }}
+
+Get the service:
+  kubectl get svc {{ include "postgres-exporter.fullname" . }} -n {{ .Release.Namespace }}
+
+Metrics endpoint (cluster-internal):
+  http://{{ include "postgres-exporter.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/metrics
+
+THE ONE CHECK THAT MATTERS. In Grafana -> Explore -> prometheus:
+  pg_up
+  -> 1 means the database credential works. A pod that is Running with pg_up 0
+     has mounted the vault successfully but cannot log in: either the `monitoring`
+     role was never created, or the vault password does not match it.
+{{- if .Values.azureKeyVault.enabled }}
+
+The password is read from Azure Key Vault {{ .Values.azureKeyVault.keyvaultName }}
+(object {{ .Values.azureKeyVault.secretPrefix }}--password) and synced by the CSI
+driver into Secret {{ .Values.azureKeyVault.syncedSecretName }}:
+  kubectl get secret {{ .Values.azureKeyVault.syncedSecretName }} -n {{ .Release.Namespace }}
+  -> exists, which proves the mount succeeded.
+{{- end }}

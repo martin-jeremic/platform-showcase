@@ -1,0 +1,104 @@
+# stages/convention-checks-stage.yml
+#
+# First gate of every PR (and CI) pipeline: repository hygiene plus a BLOCKING secret scan,
+# independent of the service being validated, so a leaked credential or an unresolved merge
+# conflict blocks the merge whichever service the change touches.
+#
+#   1. merge-conflict markers   `<<<<<<< ` / `>>>>>>> ` at the start of a line. `=======` alone is
+#                               not checked: Markdown and ASCII tables use it legitimately.
+#   2. required files           optional per-service convention (e.g. Dockerfile, GitVersion.yml,
+#                               the chart's Chart.yaml) so a new service cannot skip one.
+#   3. gitleaks                 pinned version, `--no-git`: scans the working tree only. Fast, and
+#                               it does not re-flag historical or already-triaged content on every
+#                               PR. Exceptions go in the repository's .gitleaks.toml, not here.
+#
+# The gitleaks version is PINNED. A floating :latest once reported different leak counts for the
+# same commit on two agents, because the ruleset changed between pulls. Unlike the warn-only
+# scanners, this gate FAILS CLOSED: if gitleaks cannot be installed, the stage fails.
+#
+# fetchDepth defaults to 0 even though this stage only needs the tree: in a CI pipeline it runs
+# next to the Versioning job, all jobs of a run share the agent's work folder, and a shallow
+# fetch by ANY job leaves the repository shallow for GitVersion, which then fails with
+# "The repository is shallow". Set 1 only in pipelines that do not run GitVersion.
+
+parameters:
+  - name: stageName
+    type: string
+    default: ConventionChecks
+  - name: dependsOn
+    type: object
+    default: []
+  - name: gitleaksVersion
+    type: string
+    default: '8.30.1'
+  # Paths (relative to the repo root) that must exist, e.g. [ src/api/Dockerfile ].
+  - name: requiredFiles
+    type: object
+    default: []
+  - name: fetchDepth
+    type: number
+    default: 0
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Convention checks
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: Conventions
+        displayName: Hygiene + secret scan
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: ${{ parameters.fetchDepth }}
+
+          - bash: |
+              set -euo pipefail
+              if git grep -nI -E '^(<<<<<<< |>>>>>>> )' -- .; then
+                echo "##vso[task.logissue type=error]Unresolved merge-conflict markers (see above)."
+                exit 1
+              fi
+              echo "No merge-conflict markers."
+            displayName: No merge-conflict markers
+
+          - ${{ if gt(length(parameters.requiredFiles), 0) }}:
+            - bash: |
+                set -euo pipefail
+                missing=0
+                for f in $REQUIRED_FILES; do
+                  if [ ! -e "$f" ]; then
+                    echo "##vso[task.logissue type=error]Required file missing: $f"
+                    missing=$((missing + 1))
+                  fi
+                done
+                [ "$missing" -eq 0 ] || exit 1
+                echo "All required files present."
+              displayName: Required files present
+              env:
+                REQUIRED_FILES: ${{ join(' ', parameters.requiredFiles) }}
+
+          - bash: |
+              set -euo pipefail
+              DIR="$AGENT_TOOLSDIRECTORY/gitleaks/$GITLEAKS_VERSION"
+              if [ ! -x "$DIR/gitleaks" ]; then
+                TMP="$(mktemp -d)"
+                trap 'rm -rf "$TMP"' EXIT
+                BASE="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+                TARBALL="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+                curl -fsSL -o "$TMP/$TARBALL" "$BASE/$TARBALL"
+                curl -fsSL -o "$TMP/checksums.txt" "$BASE/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+                (cd "$TMP" && sha256sum -c --ignore-missing --status checksums.txt) || {
+                  echo "##vso[task.logissue type=error]gitleaks $GITLEAKS_VERSION failed its checksum; refusing to skip the secret scan."
+                  exit 1
+                }
+                mkdir -p "$DIR"
+                tar -xzf "$TMP/$TARBALL" -C "$DIR" gitleaks
+              fi
+              # --redact keeps the matched secret out of the build log (logs outlive rotations).
+              "$DIR/gitleaks" detect --source . --no-git --redact --no-banner --exit-code 1
+            displayName: gitleaks ${{ parameters.gitleaksVersion }} (blocking)
+            env:
+              GITLEAKS_VERSION: ${{ parameters.gitleaksVersion }}

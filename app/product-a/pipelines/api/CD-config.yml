@@ -1,0 +1,39 @@
+# product-a-api config-only redeploy to DEV. Register as `product-a-api-cd-config`.
+#
+# Triggered when only values-dev.yaml changes on develop (CI.yaml excludes that path, so no image
+# is rebuilt). The chart version and the image are READ BACK from the running release, so the
+# redeploy changes configuration and nothing else.
+#
+# FIX compared with the source: the old pipeline ran `helm upgrade --reuse-values --values ...`
+# followed by `kubectl rollout restart`. --reuse-values carried forward every value of the previous
+# release, including ones since removed from the file, so deleting a key never took effect; and the
+# extra restart was needed only because nothing hashed the config into the pod template. The
+# template now passes the image coordinates explicitly and the chart's checksum/config annotation
+# rolls the pods when (and only when) the ConfigMap changed.
+#
+# Stage, demo and prod configuration is NOT here: it lives in product-a-gitops and Argo CD applies it.
+
+trigger:
+  branches:
+    include:
+      - develop
+  paths:
+    include:
+      - src/Api/helm/product-a-api/values-dev.yaml
+
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  # Produces RefusePlaceholders -> ConfigDeploy.
+  - template: stages/config-deploy-stage.yml@templates
+    parameters:
+      namespace: product-a-dev
+      chartName: product-a-api
+      valuesFile: src/Api/helm/product-a-api/values-dev.yaml

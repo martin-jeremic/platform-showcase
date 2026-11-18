@@ -1,0 +1,6 @@
+# The hub's own Prometheus scrapes it.
+trivy-operator:
+  serviceMonitor:
+    enabled: true
+  operator:
+    scanJobsConcurrentLimit: 2

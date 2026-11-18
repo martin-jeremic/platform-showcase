@@ -1,0 +1,32 @@
+apiVersion: v2
+name: trivy
+description: >-
+  Reusable security-scanning platform chart. Umbrella chart that installs the
+  upstream Aqua Security trivy-operator -- a cluster-wide operator that keeps
+  security reports up to date as Kubernetes objects: image vulnerabilities,
+  misconfigurations, secrets baked into images, risky Roles, node checks and
+  compliance (NSA, Pod Security Standards, CIS). Runs in ClientServer mode: one
+  in-cluster trivy-server holds the vulnerability database and the scan jobs are
+  thin clients. Report counts are exposed as trivy_* Prometheus metrics.
+type: application
+version: 0.3.1
+# trivy-operator version shipped by the pinned subchart.
+appVersion: "0.36.1"
+keywords:
+  - trivy
+  - security
+  - vulnerability
+  - compliance
+home: https://github.com/aquasecurity/trivy-operator
+# 0.3.1 -- trivy-operator.trivy.image.tag 0.76.2, ahead of the subchart's 0.76.1:
+#   upstream's security rebuild. trivy-server restarts once on every cluster.
+# 0.3.0 -- every platform cluster; templates/assertions.yaml: the
+#   workload-identity scan-pod label without the ServiceAccount client-id
+#   annotation fails the render.
+# 0.2.0 -- operator.metricsVulnIdEnabled: one series per finding, which the
+#   new-CVE alert and the CVE-list dashboard read.
+dependencies:
+  - name: trivy-operator
+    version: "0.38.1"
+    repository: "https://aquasecurity.github.io/helm-charts/"
+    condition: trivy-operator.enabled

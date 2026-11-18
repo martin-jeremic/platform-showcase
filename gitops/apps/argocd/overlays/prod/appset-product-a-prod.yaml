@@ -1,0 +1,127 @@
+# ApplicationSet for PROD: IN-CLUSTER on aks-product-a-prod.
+#
+# Stage and demo are spokes of the hub Argo CD. Prod is an island: its own Argo CD (namespace
+# `argocd`) already serves the platform layer on that cluster, and the same controller
+# reconciles the application layer. There is no cluster Secret and nothing to register.
+#
+# DELIBERATE DIFFERENCES from the stage/demo appsets:
+#   1. namespace `argocd`, not `argocd-hub`: this object and its Applications live on prod.
+#   2. destination is in-cluster (server: https://kubernetes.default.svc). `name: aks-product-a-prod`
+#      would never resolve here: the built-in local entry is called `in-cluster`.
+#   3. destination namespace `product-a`, NOT `product-a-prod`: the platform RBAC chart creates
+#      and grants exactly `product-a`.
+#   4. a `retry` block. Prod pulls charts from the registry over the network on every sync; a
+#      transient registry error otherwise leaves the Application Failed until a human refreshes
+#      it. Backoff only; it never changes what gets deployed.
+#   5. NO automated sync by default. Prod went live with manual sync, on purpose, so the first
+#      deployment of every service was a decision and not a side effect of applying the root
+#      app. Individual apps opt in through release.yaml (templatePatch at the bottom).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: product-a-prod
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    # Deleting apps/<svc>/prod/release.yaml deletes the generated Application, and the
+    # resources-finalizer below CASCADE-DELETES its workloads. That is independent of the sync
+    # policy: holding automated sync does NOT make deletion safe. Branch policy on main is the
+    # control for this path.
+    preserveResourcesOnDeletion: false
+  generators:
+    - git:
+        repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+        revision: main
+        files:
+          - path: "apps/*/prod/release.yaml"
+  template:
+    metadata:
+      name: "{{index .path.segments 1}}-prod"
+      namespace: argocd
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+      labels:
+        app.kubernetes.io/part-of: product-a
+        example.com/service: "{{index .path.segments 1}}"
+        example.com/env: prod
+        example.com/cluster: aks-product-a-prod
+    spec:
+      project: product-a
+      sources:
+        # Prod runs the exact chart + image pair Stage was approved at: Promote_Prod copies
+        # stage/release.yaml and stage/image.yaml here.
+        - repoURL: productacr.azurecr.io/helm
+          chart: "{{index .path.segments 1}}"
+          targetRevision: "{{.chart.version}}"
+          helm:
+            valueFiles:
+              - "$values/apps/{{index .path.segments 1}}/prod/values.yaml"
+              - "$values/apps/{{index .path.segments 1}}/prod/image.yaml"
+        - repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: product-a
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: batch
+          kind: CronJob
+          jsonPointers:
+            - /spec/jobTemplate/spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+      syncPolicy:
+        # No `automated:` key. A generated Application shows OutOfSync and deploys NOTHING until
+        # someone syncs it (`argocd app sync <svc>-prod`), unless its release.yaml opts in.
+        # The cost, stated plainly: without automated sync there is no selfHeal, so a hand edit of
+        # a prod Deployment stays edited.
+        syncOptions:
+          - CreateNamespace=true
+          - RespectIgnoreDifferences=true
+        # Applies to manual syncs too: a chart pull that fails on a registry blip retries
+        # instead of needing a second click.
+        retry:
+          limit: 5
+          backoff:
+            duration: 30s
+            factor: 2
+            maxDuration: 10m
+  # PER-APP OPT-IN to automated sync.
+  #
+  # Why templatePatch and not a value in `template:` above: Go-template substitution inside
+  # `template:` can only fill in the VALUE of a field already present in the YAML. It cannot add
+  # or remove a KEY, because this file must parse as plain YAML before any templating happens
+  # (the root app applies it like any other manifest). Prod's default is the ABSENCE of
+  # spec.syncPolicy.automated, whose mere presence turns auto-sync on whatever prune/selfHeal say.
+  # templatePatch is a raw string, rendered per app, parsed as YAML afterwards and applied as a
+  # JSON merge patch, so its {{if}}/{{else}} may add a whole key.
+  #
+  # `index . "syncPolicy"` and not `.syncPolicy`: under missingkey=error a bare dot-chain errors
+  # the whole render the moment ONE release.yaml lacks the key; `index` is a plain map lookup that
+  # yields a falsy zero value instead. `dig` is the same safeguard for the two leaves.
+  #
+  # No syncPolicy in release.yaml renders `{}`: an empty JSON merge patch, a documented no-op, so
+  # every app that does not opt in keeps manual sync. Edge case to know: an empty
+  # `syncPolicy: {automated: {}}` is a no-op on stage/demo but NOT here: it turns automated sync
+  # ON for that app with both flags defaulted to true. Set both keys explicitly.
+  #
+  # Whole-environment re-arm, once prod is trusted: replace the {{- else }} branch with the same
+  # automated block, defaulting to true. One commit; the root app syncs this appset.
+  templatePatch: |
+    {{- if index . "syncPolicy" }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: {{ dig "syncPolicy" "automated" "prune" true . }}
+          selfHeal: {{ dig "syncPolicy" "automated" "selfHeal" true . }}
+    {{- else }}
+    {}
+    {{- end }}

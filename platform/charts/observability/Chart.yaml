@@ -1,0 +1,87 @@
+apiVersion: v2
+name: observability
+description: >
+  The observability stack as one umbrella chart: kube-prometheus-stack
+  (Prometheus + Grafana + Alertmanager), Loki 3 (Monolithic), Grafana Alloy and
+  Tempo 3. Serves BOTH topologies from one set of templates: the HUB (its
+  Prometheus/Loki/Tempo also receive every agent spoke's telemetry through
+  observability-ingest) and STANDALONE clusters (scrape and store themselves
+  only). The base values name no environment; every cluster fact lives in the
+  gitops repo, and the render fails on a missing one rather than inheriting
+  another cluster's value.
+type: application
+version: 3.4.0
+appVersion: "1.0"
+
+keywords:
+  - monitoring
+  - grafana
+  - prometheus
+  - alertmanager
+  - loki
+  - tempo
+  - alloy
+
+# -----------------------------------------------------------------------------
+# 3.4.0 (merge of the two lineages this chart grew from):
+#   - the org lineage's mechanism: Alertmanager config rendered by THIS chart from
+#     `notifications:` (derived template defines, audiences, set-not-merge), the
+#     default scrape class that stamps `cluster` from externalLabels, per-file rule
+#     gates and per-folder dashboard gates, the hub's Argo dest_cluster recording
+#     rule;
+#   - the product lineage's production floor: priority tiers on every workload
+#     (system-node-critical for the DaemonSets, system-cluster-critical for the
+#     rest), Key Vault CSI-mounted receiver credentials with WORKLOAD IDENTITY as
+#     the default auth, templates/assertions.yaml, the Alloy log-contract stage,
+#     and the scaling/notice alerts.
+#
+# Earlier, condensed:
+#   - kube-prometheus-stack 86.2.2 -> 92.17.0 (operator v0.94.2, Prometheus
+#     v3.15.1, Grafana 13.3.0, kube-state-metrics v2.20.0 -- endpoints ->
+#     endpointslices collector). The CRDs ride in the chart; Argo applies them
+#     server-side on every sync. The admission-webhook Secret becomes
+#     kubernetes.io/tls: the chart's certgen hook converts the live Opaque one in
+#     place on the first sync.
+#   - Loki: grafana/loki 6.55.0 -> grafana-community/loki 20.2.1 (Loki 3.7.9).
+#     grafana/loki 7.x is the Enterprise (GEL) chart; the OSS chart moved. Its
+#     values schema rejects unknown top-level keys, so `loki.minio` is gone;
+#     deploymentMode is `Monolithic` (SingleBinary's new name). Same StatefulSet
+#     selector and volumeClaimTemplate, so the PVC is kept.
+#   - Tempo: grafana/tempo 1.24.4 (deprecated) -> grafana-community/tempo 3.2.1
+#     (Tempo 3.1.1): no ingester/compactor any more (live-store + backend
+#     scheduler/worker), no opencensus receiver.
+#   - Promtail removed, Grafana Alloy is the log collector on every cluster
+#     (Promtail is end-of-life upstream).
+#   - Alertmanager pinned v0.34.2 (the subchart default is still v0.34.1); see
+#     values.yaml for why >= 0.34 is REQUIRED.
+#   - The mail subject starts with the status WORD instead of '[': Alertmanager
+#     YAML-decodes rendered webhook payload strings, and "[FIRING:2] ..." decoded
+#     to a list, so Graph /sendMail rejected every mail with 400.
+#
+# Optional dependencies are gated by the `components:` map in values.yaml, NOT by
+# an `enabled` key inside the alias blocks: those blocks are the SUBCHART value
+# blocks, and a gate key there is a stray value handed to a third-party chart.
+#
+# A condition-DISABLED dependency must STILL be present in charts/ at render time:
+# Helm's CheckDependencies compares Chart.yaml against the loaded charts/ BEFORE
+# conditions are evaluated. `helm dependency build` fetches all four.
+# -----------------------------------------------------------------------------
+dependencies:
+  - name: kube-prometheus-stack
+    version: "92.17.0"
+    repository: https://prometheus-community.github.io/helm-charts
+    alias: kubePromStack
+  - name: loki
+    version: "20.2.1"
+    repository: https://grafana-community.github.io/helm-charts
+    alias: loki
+  - name: alloy
+    version: "1.15.0"
+    repository: https://grafana.github.io/helm-charts
+    alias: alloy
+    condition: components.alloy
+  - name: tempo
+    version: "3.2.1"
+    repository: https://grafana-community.github.io/helm-charts
+    alias: tempo
+    condition: components.tempo

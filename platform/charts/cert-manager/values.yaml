@@ -1,0 +1,227 @@
+# cert-manager -- BASE values
+#
+# Umbrella chart: installs the upstream Jetstack cert-manager controller (+ its
+# CRDs) and templates ClusterIssuers / optional Certificates on top. Sync wave 1 --
+# the ClusterIssuer must be Ready before traefik's Certificate (wave 2) can be
+# issued, and nothing downstream is reachable until that certificate exists.
+nameOverride: ""
+fullnameOverride: "cert-manager-issuers"
+commonLabels: {}
+
+# ---------------------------------------------------------------------------
+# DNS-01 API token -- used by the ACME solver.
+# ---------------------------------------------------------------------------
+# THIS CHART ONLY REFERENCES THE SECRET. It has no template that can create it,
+# and no `apiToken` value to hold one. That is deliberate and is the fix for the
+# worst finding of the platform review: the chart this was forked from shipped a
+# `cloudflare.secret.create` flag plus an `apiToken` value, and a live token with
+# Zone:DNS:Edit on every product zone -- ACME-issuance authority for every one of
+# those domains -- was committed to git in an overlay. Removing the template
+# removes the mechanism.
+#
+# Why not Key Vault via CSI, like every other secret here: the Secrets Store CSI
+# driver only materialises and rotates a Secret WHILE a pod mounts the
+# SecretProviderClass volume, and cert-manager mounts nothing at all. An SPC for
+# this token would render happily and silently never sync.
+#
+# So it is seeded once, by hand, from the gitops repo's setup/ folder, which is
+# excluded from the root kustomization so Argo CD never prunes it.
+cloudflare:
+  secret:
+    # Must live in the cert-manager (cluster-resource) namespace so ClusterIssuer
+    # DNS-01 solvers can read it.
+    name: cloudflare-api-token
+    namespace: cert-manager
+    key: api-token
+
+# ---------------------------------------------------------------------------
+# ClusterIssuers (cluster-scoped). List-driven so any ACME/CA/solver fits.
+# Each entry: { name, enabled, spec } where `spec` is the raw ClusterIssuer .spec.
+# NOTE: Helm REPLACES (does not merge) lists -- an overlay redeclares the full list.
+# ---------------------------------------------------------------------------
+clusterIssuers:
+  # DNS-01, because the gateway certificate is issued in wave 2, before the
+  # Gateway is serving anything: DNS-01 does not need the edge to be reachable.
+  - name: letsencrypt-prod
+    enabled: true
+    spec:
+      acme:
+        server: https://acme-v02.api.letsencrypt.org/directory
+        email: platform-team@example.com
+        privateKeySecretRef:
+          name: letsencrypt-prod-private-key
+        solvers:
+          - dns01:
+              cloudflare:
+                apiTokenSecretRef:
+                  name: cloudflare-api-token
+                  key: api-token
+  # Let's Encrypt STAGING -- enable while testing to avoid burning prod rate
+  # limits. Certificates issued by it are untrusted by browsers.
+  - name: letsencrypt-staging
+    enabled: false
+    spec:
+      acme:
+        server: https://acme-staging-v02.api.letsencrypt.org/directory
+        email: platform-team@example.com
+        privateKeySecretRef:
+          name: letsencrypt-staging-private-key
+        solvers:
+          - dns01:
+              cloudflare:
+                apiTokenSecretRef:
+                  name: cloudflare-api-token
+                  key: api-token
+
+# Namespaced Issuers (optional). Each entry: { name, namespace, enabled, spec }.
+issuers: []
+
+# Certificates (optional). The CONSUMING chart owns its own Certificate -- the
+# traefik chart templates the gateway cert. Keep this empty.
+certificates: []
+
+# ===========================================================================
+# Upstream cert-manager subchart. Everything under `cert-manager:` is passed
+# verbatim to the Jetstack chart.
+# ===========================================================================
+cert-manager:
+  enabled: true
+
+  # ---- Prometheus metrics ----
+  # prometheus.enabled is already the subchart default, so the controller's
+  # :9402 metrics Service has always existed; the ServiceMonitor is the only
+  # thing that was off. certmanager_certificate_expiration_timestamp_seconds is
+  # the reliable expiry source: Traefik's own traefik_tls_certs_not_after stays
+  # empty here because TLS is terminated through the Gateway API provider with
+  # cert-manager-issued Secrets, which Traefik's own TLS store never sees.
+  prometheus:
+    enabled: true
+    servicemonitor:
+      enabled: true
+
+  global:
+    # The subchart exposes priorityClassName ONCE, here -- its JSON schema rejects
+    # a per-component priorityClassName under controller/webhook/cainjector.
+    # Application pods must not be able to preempt the component that issues the
+    # cluster's TLS certificates.
+    priorityClassName: system-cluster-critical
+
+  # crds.enabled makes the CRDs part of THIS release, so Argo CD tracks and
+  # upgrades them with the chart instead of them being a hand-applied artifact
+  # that drifts. keep=true leaves the CRDs -- and existing Certificates -- intact
+  # if the release is ever uninstalled.
+  crds:
+    enabled: true
+    keep: true
+
+  # ---------------------------------------------------------------------------
+  # HA -- applied to ALL THREE deployments, not just the controller.
+  # ---------------------------------------------------------------------------
+  # On the demo cluster all six cert-manager pods (controller x2, cainjector x2,
+  # webhook x2) sat on ONE node: the overlay set replicaCount: 2 and PDBs but no
+  # topologySpreadConstraints. A single node drain then took the webhook to zero
+  # replicas -- `no endpoints available for service "...-webhook"` -- and the
+  # webhook is in the admission path for every cert-manager.io object, so
+  # certificate issuance stopped cluster-wide.
+  #
+  # The labelSelectors name the RELEASE (app.kubernetes.io/instance), so they
+  # assume the catalog release name `cert-manager`. A descriptor that adopts a
+  # differently named release must restate them, or the selector matches zero pods
+  # and the constraint is vacuously satisfied.
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: cert-manager
+          app.kubernetes.io/component: controller
+  # kubernetes.io/os: linux is the subchart default and must be preserved -- it is
+  # what keeps these pods off Windows nodes.
+  nodeSelector:
+    kubernetes.io/os: linux
+    pool: infra
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: infra
+      effect: NoSchedule
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  webhook:
+    replicaCount: 2
+    podDisruptionBudget:
+      enabled: true
+      maxUnavailable: 1
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/instance: cert-manager
+            app.kubernetes.io/component: webhook
+    nodeSelector:
+      kubernetes.io/os: linux
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  cainjector:
+    replicaCount: 2
+    podDisruptionBudget:
+      enabled: true
+      maxUnavailable: 1
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/instance: cert-manager
+            app.kubernetes.io/component: cainjector
+    nodeSelector:
+      kubernetes.io/os: linux
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # Disabled deliberately. startupapicheck is a post-install/post-upgrade Helm
+  # hook Job that probes the API for the cert-manager CRDs. Argo CD translates Helm
+  # hooks into its own resource hooks, so it becomes a PostSync Job whose failure
+  # marks the Application Degraded -- for a reason unrelated to whether the
+  # controller is healthy. Argo already gates the next sync wave on this release
+  # being Healthy, and wave 2 gates on the ClusterIssuer being Ready, so the check
+  # is redundant here and only adds a way for a green deployment to report red.
+  startupapicheck:
+    enabled: false

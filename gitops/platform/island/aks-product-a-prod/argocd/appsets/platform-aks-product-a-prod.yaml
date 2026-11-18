@@ -1,0 +1,123 @@
+# Platform ApplicationSet for aks-product-a-prod -- the ISLAND: its own in-cluster
+# Argo CD, no hub, no spoke registration.
+#
+# A component deploys IFF platform/aks-product-a-prod/<component>.yaml exists.
+# Every Application carries automated {prune, selfHeal}, except `argocd`, which sets
+# prune: false (templatePatch below).
+#
+# MULTI-SOURCE, per-chart tag pin:
+#   chart  -> the charts repo at the descriptor's chartRevision, e.g. traefik-1.2.0.
+#             A tag makes a version AVAILABLE; the descriptor bump makes it LIVE
+#             (RELEASING.md). Rollback = revert the descriptor bump.
+#   values -> platform/values/aks-product-a-prod/<component>.yaml from THIS repo at
+#             main. Operating the platform is mostly values changes (a hostname, a
+#             replica count, a client ID), and those should not need a chart edit,
+#             a version bump, a tag and a descriptor bump -- four steps to change
+#             one number. The trade-off, stated plainly: values are NOT pinned; a
+#             merge is live on the next sync and `git revert` is the rollback.
+#
+# ignoreMissingValueFiles is NOT set: a missing or misnamed values file fails the
+# render instead of silently deploying chart defaults while reporting Synced.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-aks-product-a-prod
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+  generators:
+    - git:
+        repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-platform-gitops
+        revision: main
+        # platform/<cluster>/*.yaml: catalog.yaml sits at platform/*.yaml and is
+        # NOT matched -- parsed as a descriptor it would hit missingkey=error on the
+        # absent chartRevision and fail generation for EVERY component at once.
+        files:
+          - path: "platform/aks-product-a-prod/*.yaml"
+  template:
+    metadata:
+      name: "aks-product-a-prod-{{.path.filename | trimSuffix `.yaml`}}"
+      namespace: argocd
+      annotations:
+        argocd.argoproj.io/sync-wave: "{{.syncWave}}"
+        # A compare-option, so an annotation (see the hub appsets).
+        argocd.argoproj.io/compare-options: ServerSideDiff=true
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+      labels:
+        app.kubernetes.io/part-of: product-a-platform
+        example.com/component: "{{.path.filename | trimSuffix `.yaml`}}"
+        example.com/cluster: aks-product-a-prod
+    spec:
+      project: product-a-platform
+      sources:
+        - repoURL: https://dev.azure.com/example-org/platform/_git/org-platform
+          # The pin. The appset this was modelled on used `targetRevision: main` --
+          # no way to pin or roll back, and a push to main reached every
+          # auto-syncing cluster at once.
+          targetRevision: "{{.chartRevision}}"
+          path: "{{.chartPath}}"
+          helm:
+            releaseName: "{{.releaseName}}"
+            valueFiles:
+              - values.yaml
+              - $values/platform/values/aks-product-a-prod/{{.path.filename}}
+        - repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-platform-gitops
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{.namespace}}"
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: batch
+          kind: CronJob
+          jsonPointers:
+            - /spec/jobTemplate/spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        # THE AKS admissions-enforcer CARVE-OUT -- mandatory BEFORE the first
+        # cert-manager sync (the equivalent release elsewhere sat `failed` for
+        # weeks without it). Three parts, none obvious, all required: this entry,
+        # the ServerSideDiff annotation, and RespectIgnoreDifferences below.
+        - group: admissionregistration.k8s.io
+          kind: ValidatingWebhookConfiguration
+          jqPathExpressions:
+            - '.webhooks[]?.namespaceSelector.matchExpressions[]? | select(.key == "control-plane" or .key == "kubernetes.azure.com/managedby")'
+        - group: admissionregistration.k8s.io
+          kind: MutatingWebhookConfiguration
+          jqPathExpressions:
+            - '.webhooks[]?.namespaceSelector.matchExpressions[]? | select(.key == "control-plane" or .key == "kubernetes.azure.com/managedby")'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+          - RespectIgnoreDifferences=true
+  # Per-component prune opt-out. Exactly one component sets `prune: false`:
+  # `argocd`, which manages the controller performing the sync. Pruning your own
+  # controller mid-sync deletes a resource needed to finish the deletion, with
+  # nothing left running to recover.
+  #
+  # A STRING block, so the {{if}} is legal; `and` short-circuits, so
+  # missingkey=error is safe (.prune is read only when hasKey). Patches ONLY
+  # syncPolicy.automated: naming `sources` would replace the whole list and drop the
+  # $values source.
+  templatePatch: |
+    {{- if and (hasKey . "prune") (not .prune) }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
+    {{- end }}

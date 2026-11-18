@@ -1,0 +1,259 @@
+# steps/gitops-promote-steps.yml
+#
+# One approval-gated GitOps promotion: write the approved state for one app (and optionally
+# its paired app) into one environment folder, as ONE commit. Neither file is Argo YAML:
+#
+#   apps/<app>/<targetEnv>/image.yaml    <- the image map, copied from <sourceEnv> (digestFrom:
+#                                           gitops) or built from the CI deploy-meta artifact
+#                                           (digestFrom: artifact). CI-owned, rewritten whole.
+#   apps/<app>/<targetEnv>/release.yaml  <- ONLY .chart.version is set. Every other key in the
+#                                           file (chart.name, destination, a hand-set
+#                                           syncPolicy opt-out) is preserved by yq.
+#
+# The ApplicationSet's git-files generator reads release.yaml and stamps chart.version into the
+# generated Application; Argo then reconciles to exactly this approved pair.
+#
+# Run it inside a `deployment` job whose `environment:` carries the approval check, with
+#   uses: { repositories: [ gitops ] }
+# and `checkout: none`. The repo is cloned HERE, after the approval was granted, at the current
+# tip. A `resources.repositories` checkout would snapshot the tip when the job was queued, i.e.
+# before an approval that may come hours later and before any concurrent promotion, and the
+# push would be rejected as non-fast-forward.
+#
+# Guards (each one is an incident or a near miss):
+#   - the source digest must match ^sha256:[0-9a-f]{64}$ (never promote a tag or an empty value);
+#   - <targetEnv>/values.yaml must exist: the ApplicationSet renders every app with it, so a pin
+#     without it creates an Application that can never render while the environment keeps
+#     running its previous image, and this step would still report success. That is exactly
+#     how a chart rename once left two environments on a weeks-old image;
+#   - ordering: refuse to write a chart pin OLDER than the one the target runs, unless
+#     allowDowngrade is set. Approving a stale run that sat pending for days would otherwise
+#     roll an environment back without anybody deciding to;
+#   - chart pin "*" or empty is refused ("*" excludes prereleases; see the GitOps README).
+
+parameters:
+  - name: appName
+    type: string
+  # Promoted with the SAME digest source and the SAME chart version, in the SAME commit.
+  - name: pairedAppName
+    type: string
+    default: ''
+  - name: targetEnv
+    type: string
+  # gitops mode: the env folder whose image.yaml (and, when chartVersion is empty,
+  # release.yaml) is copied.
+  - name: sourceEnv
+    type: string
+    default: ''
+  - name: digestFrom
+    type: string
+    default: gitops
+    values: [gitops, artifact]
+  # artifact mode: pipeline resource alias + artifact holding image.env (VERSION=, DIGEST=).
+  - name: metaPipelineAlias
+    type: string
+    default: ''
+  - name: metaArtifactName
+    type: string
+    default: ''
+  # Exact chart version to pin. Empty = take it from the source (sourceEnv's release.yaml in
+  # gitops mode, VERSION from image.env in artifact mode).
+  - name: chartVersion
+    type: string
+    default: ''
+  - name: allowDowngrade
+    type: boolean
+    default: false
+  # true = release.yaml must already exist (company model: it carries a hand-seeded
+  # destination). false = create it on first promotion (product model).
+  - name: requireReleaseFile
+    type: boolean
+    default: false
+  - name: gitopsRepoUrl
+    type: string
+  - name: gitopsBranch
+    type: string
+    default: main
+
+steps:
+  - ${{ if eq(parameters.digestFrom, 'artifact') }}:
+    - download: ${{ parameters.metaPipelineAlias }}
+      artifact: ${{ coalesce(parameters.metaArtifactName, format('deploy-meta-{0}', parameters.appName)) }}
+      displayName: Download ${{ coalesce(parameters.metaArtifactName, format('deploy-meta-{0}', parameters.appName)) }}
+
+  - template: yq-install-steps.yml
+
+  - bash: |
+      set -euo pipefail
+
+      git_auth() { git -c http.extraheader="AUTHORIZATION: bearer ${SYSTEM_ACCESSTOKEN}" "$@"; }
+      fail() { echo "##vso[task.logissue type=error]$*"; exit 1; }
+      WORKDIR="$(mktemp -d)"
+      trap 'rm -rf "$WORKDIR"' EXIT
+
+      SEMVER_RE='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+      # True (0) when $1 has LOWER precedence than $2 (SemVer 2.0.0, section 11). `sort -V` is
+      # not enough: it orders 1.2.0 before 1.2.0-alpha.1, the opposite of SemVer.
+      semver_lt() {
+        local a="${1#v}" b="${2#v}" i x y n
+        a="${a%%+*}"; b="${b%%+*}"
+        local a_pre="" b_pre=""
+        [[ "$a" == *-* ]] && a_pre="${a#*-}"
+        [[ "$b" == *-* ]] && b_pre="${b#*-}"
+        local -a ac bc ap bp
+        IFS=. read -r -a ac <<< "${a%%-*}"
+        IFS=. read -r -a bc <<< "${b%%-*}"
+        for i in 0 1 2; do
+          x="${ac[i]}"; y="${bc[i]}"
+          if (( 10#$x < 10#$y )); then return 0; fi
+          if (( 10#$x > 10#$y )); then return 1; fi
+        done
+        [ -z "$a_pre" ] && return 1          # a release outranks every prerelease of it
+        [ -z "$b_pre" ] && return 0
+        IFS=. read -r -a ap <<< "$a_pre"
+        IFS=. read -r -a bp <<< "$b_pre"
+        n=${#ap[@]}; (( ${#bp[@]} > n )) && n=${#bp[@]}
+        for (( i = 0; i < n; i++ )); do
+          x="${ap[i]-}"; y="${bp[i]-}"
+          [ -z "$x" ] && return 0            # fewer identifiers = lower precedence
+          [ -z "$y" ] && return 1
+          if [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]]; then
+            if (( 10#$x < 10#$y )); then return 0; fi
+            if (( 10#$x > 10#$y )); then return 1; fi
+          elif [[ "$x" =~ ^[0-9]+$ ]]; then return 0   # numeric < alphanumeric
+          elif [[ "$y" =~ ^[0-9]+$ ]]; then return 1
+          elif [[ "$x" < "$y" ]]; then return 0
+          elif [[ "$x" > "$y" ]]; then return 1
+          fi
+        done
+        return 1
+      }
+
+      git_auth clone --quiet --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$WORKDIR/gitops"
+      cd "$WORKDIR/gitops"
+      git config user.name "ci-bot"
+      git config user.email "ci-bot@example.com"
+
+      # ── 1. Resolve what is being promoted ──────────────────────────────────────────────
+      ART_VERSION="" ART_DIGEST=""
+      if [ "$DIGEST_FROM" = "artifact" ]; then
+        META="$PIPELINE_WORKSPACE/$META_ALIAS/$META_ARTIFACT/image.env"
+        [ -f "$META" ] || fail "No $META. A CI run that found no releasable commit publishes no deploy-meta; nothing to promote."
+        # Parsed, never `source`d: an artifact is data, and sourcing it would execute it.
+        ART_VERSION="$(awk -F= '$1 == "VERSION" { print $2 }' "$META" | tr -d '\r')"
+        ART_DIGEST="$(awk -F= '$1 == "DIGEST" { print $2 }' "$META" | tr -d '\r')"
+      fi
+
+      CHART_VERSION="${CHART_VERSION_PARAM}"
+      if [ -z "$CHART_VERSION" ]; then
+        if [ "$DIGEST_FROM" = "artifact" ]; then
+          CHART_VERSION="$ART_VERSION"
+        else
+          SRC_REL="apps/$APP/$SOURCE_ENV/release.yaml"
+          [ -f "$SRC_REL" ] || fail "No release pin at $SRC_REL. Promote $SOURCE_ENV first."
+          CHART_VERSION="$(yq -r '.chart.version // ""' "$SRC_REL")"
+        fi
+      fi
+      [ "$CHART_VERSION" != "*" ] || fail "Refusing chart pin '*': it is a range that excludes prereleases."
+      [[ "$CHART_VERSION" =~ $SEMVER_RE ]] || fail "No exact chart version to promote (got: '$CHART_VERSION')."
+
+      promote_one() {
+        local app="$1" target_dir="apps/$1/$TARGET_ENV"
+        local digest current
+
+        # values.yaml is the env's configuration. A promotion moves an app that is already
+        # configured for this env; it never creates that configuration.
+        [ -f "$target_dir/values.yaml" ] || fail "No $target_dir/values.yaml. The $TARGET_ENV ApplicationSet renders every app with it, so this pin would create an Application that cannot render while $TARGET_ENV keeps its current image. Add the env config first (after a chart rename: move it from the old folder in the same commit that removes the old pins), then re-run."
+
+        # Image map: from the CI artifact, or copied verbatim from the source env.
+        if [ "$DIGEST_FROM" = "artifact" ]; then
+          digest="$ART_DIGEST"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "deploy-meta for $app has no valid digest (got: '$digest')."
+          {
+            echo "# Managed by CD (gitops-promote-steps.yml). Do not edit by hand. digest overrides tag."
+            TAG="$ART_VERSION" DIGEST="$digest" \
+              yq -n '.image.tag = strenv(TAG) | .image.digest = strenv(DIGEST) | .image.* style="double"'
+          } > "$target_dir/image.yaml.new"
+        else
+          local src="apps/$app/$SOURCE_ENV/image.yaml"
+          [ -f "$src" ] || fail "No recorded image at $src. Run the $SOURCE_ENV flow first."
+          digest="$(yq -r '.image.digest // ""' "$src")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "No valid digest in $src (got: '$digest'). Nothing to promote."
+          {
+            echo "# Written by the approval-gated promotion from $SOURCE_ENV. Do not edit by hand."
+            yq '{"image": .image} | .image.* style="double"' "$src"
+          } > "$target_dir/image.yaml.new"
+        fi
+
+        # Ordering guard against the pin the target currently runs.
+        if [ -f "$target_dir/release.yaml" ]; then
+          current="$(yq -r '.chart.version // ""' "$target_dir/release.yaml")"
+          if [[ "$current" =~ $SEMVER_RE ]] && semver_lt "$CHART_VERSION" "$current"; then
+            if [ "${ALLOW_DOWNGRADE,,}" = "true" ]; then
+              echo "##vso[task.logissue type=warning]$app/$TARGET_ENV: DOWNGRADE $current -> $CHART_VERSION allowed by allowDowngrade."
+            else
+              fail "$app/$TARGET_ENV runs chart $current; this run would pin the OLDER $CHART_VERSION. A stale run was probably approved. Re-run with allowDowngrade=true if a rollback is intended (or git revert the promotion commit)."
+            fi
+          fi
+          CHART_VERSION="$CHART_VERSION" yq -i '.chart.version = strenv(CHART_VERSION) | .chart.version style="double"' "$target_dir/release.yaml"
+        elif [ "${REQUIRE_RELEASE,,}" = "true" ]; then
+          fail "No $target_dir/release.yaml. In this model it carries the destination and is hand-seeded once; create it, then re-run."
+        else
+          {
+            echo "# Chart-version pin for $app ($TARGET_ENV), read by the ApplicationSet git-files generator."
+            echo "# .chart.version is written by the approval-gated promotion. Any OTHER top-level key"
+            echo "# (e.g. syncPolicy) is hand-maintained and preserved across promotions."
+            CHART_VERSION="$CHART_VERSION" yq -n '.chart.version = strenv(CHART_VERSION) | .chart.version style="double"'
+          } > "$target_dir/release.yaml"
+        fi
+
+        mv "$target_dir/image.yaml.new" "$target_dir/image.yaml"
+        git add "$target_dir/image.yaml" "$target_dir/release.yaml"
+        echo "Promoting $app -> $TARGET_ENV: $digest, chart $CHART_VERSION"
+        PROMOTED_DIGEST="$digest"
+      }
+
+      PROMOTED_DIGEST=""
+      promote_one "$APP"
+      [ -z "$PAIRED" ] || promote_one "$PAIRED"
+
+      if git diff --cached --quiet; then
+        echo "Already promoted; nothing to commit."
+        exit 0
+      fi
+      git commit --quiet -m "promote $APP${PAIRED:+ + $PAIRED} -> $TARGET_ENV: $PROMOTED_DIGEST (chart $CHART_VERSION)"
+
+      # Same race and the same retry as gitops-record-steps.yml: every promotion of every
+      # service lands on this one branch. Files of different apps never conflict, so a rebase
+      # onto the new tip is safe; a conflict means somebody else promoted THIS app meanwhile,
+      # and that must be looked at, not merged automatically.
+      for attempt in 1 2 3 4 5; do
+        if git_auth push --quiet origin "HEAD:$REPO_BRANCH"; then
+          echo "Approved state for $TARGET_ENV pushed (attempt $attempt)."
+          exit 0
+        fi
+        echo "Push rejected: $REPO_BRANCH moved. Rebasing (attempt $attempt of 5)."
+        git_auth fetch --quiet --depth 50 origin "$REPO_BRANCH"
+        if ! git rebase --quiet FETCH_HEAD; then
+          git rebase --abort || true
+          fail "$APP/$TARGET_ENV was changed by another commit while this promotion ran. Nothing was written; review the latest promotion and re-run this stage."
+        fi
+        sleep $(( attempt * 3 ))
+      done
+      fail "Lost the push race on $REPO_BRANCH five times; nothing was promoted. Re-run this stage."
+    displayName: Write approved state to GitOps (${{ parameters.appName }} -> ${{ parameters.targetEnv }})
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      APP: ${{ parameters.appName }}
+      PAIRED: ${{ parameters.pairedAppName }}
+      TARGET_ENV: ${{ parameters.targetEnv }}
+      SOURCE_ENV: ${{ parameters.sourceEnv }}
+      DIGEST_FROM: ${{ parameters.digestFrom }}
+      META_ALIAS: ${{ parameters.metaPipelineAlias }}
+      META_ARTIFACT: ${{ coalesce(parameters.metaArtifactName, format('deploy-meta-{0}', parameters.appName)) }}
+      CHART_VERSION_PARAM: ${{ parameters.chartVersion }}
+      ALLOW_DOWNGRADE: ${{ parameters.allowDowngrade }}
+      REQUIRE_RELEASE: ${{ parameters.requireReleaseFile }}
+      REPO_URL: ${{ parameters.gitopsRepoUrl }}
+      REPO_BRANCH: ${{ parameters.gitopsBranch }}

@@ -1,0 +1,54 @@
+{{- /*
+Headless Service for jgroups DNS_PING peer discovery.
+
+This object is what makes a 2-replica Keycloak a real cluster instead of two
+independent servers, and it did not exist in the chart this was forked from -- which
+is why that chart was pinned to replicaCount: 1.
+
+HOW IT WORKS. Infinispan (KC_CACHE: ispn) needs each replica to find the others.
+With KC_CACHE_STACK: kubernetes, jgroups uses the DNS_PING protocol: it resolves the
+DNS name given in -Djgroups.dns.query and treats every A record returned as a peer.
+A headless Service (clusterIP: None) is exactly that -- its DNS name resolves to the
+pod IPs rather than to a single virtual IP.
+
+WHY DNS_PING AND NOT KUBE_PING. KUBE_PING queries the Kubernetes API for pods, which
+means the pod needs a ServiceAccount with list/get on pods, i.e. a Role and
+RoleBinding this chart would have to own. DNS_PING needs no cluster permissions at
+all -- only DNS, which every pod already has.
+
+publishNotReadyAddresses: true is essential and easy to miss. During startup a
+Keycloak pod is not Ready until it has joined the cache cluster, but it cannot join
+until it can discover peers. With the default (false) the two pods never appear in
+each other's DNS answers while they are both starting, both time out, and both form
+single-member clusters -- a deadlock that only shows up on a cold start of the whole
+deployment, not on a rolling update.
+
+THE FAILURE THIS PREVENTS is quiet. Two unclustered replicas serve traffic normally;
+the symptom is that a user is randomly logged out as the Gateway load-balances them
+to the pod that does not hold their session, and every rolling update logs everyone
+out. Verify a real 2-member view rather than assuming:
+  kubectl logs -n keycloak deploy/keycloak | grep ISPN000094
+*/ -}}
+{{- if .Values.clustering.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "keycloak.fullname" . }}-headless
+  labels:
+    {{- include "keycloak.labels" . | nindent 4 }}
+  annotations:
+    # Not a traffic-serving Service; excluded from any topology-aware routing.
+    service.kubernetes.io/topology-mode: "Disabled"
+spec:
+  # Headless: DNS returns one A record per pod IP, which is what DNS_PING consumes.
+  clusterIP: None
+  # See the note above -- without this, cold starts deadlock.
+  publishNotReadyAddresses: true
+  ports:
+    - name: jgroups
+      port: {{ .Values.clustering.port }}
+      targetPort: jgroups
+      protocol: TCP
+  selector:
+    {{- include "keycloak.selectorLabels" . | nindent 4 }}
+{{- end }}

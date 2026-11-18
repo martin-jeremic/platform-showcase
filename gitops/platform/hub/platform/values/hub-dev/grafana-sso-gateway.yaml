@@ -1,0 +1,11 @@
+domain: dev.example.com
+oidc:
+  keycloak:
+    baseUrl: https://dev.example.com/keycloak
+    # The broker realm: one OIDC provider for Grafana, fronting the user realms.
+    realm: grafana
+  grafana:
+    rootUrl: https://dev.example.com/monitoring/grafana
+    # A hub serving several tenants: scope groups map to separate Grafana Orgs
+    # (each with its own single-tenant Loki datasource).
+    orgMapping: "grafana-product-a:product-a:Viewer"

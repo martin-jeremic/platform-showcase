@@ -1,0 +1,50 @@
+# Grafana dashboards, delivered from this repo by kustomize.
+#
+# A hand-written Application rather than one more descriptor in the platform appset:
+# that template is Helm-shaped (chartPath, chartRevision, helm.valueFiles, a $values
+# source) and a kustomize directory fits none of it. Bending the template for one
+# special case would add a conditional to the thing that generates every component.
+#
+# Listed in ../kustomization.yaml (unlike setup/), so the root app manages it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana-dashboards
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: product-a-platform
+    example.com/component: grafana-dashboards
+    example.com/cluster: aks-product-a-prod
+spec:
+  project: product-a-platform
+  source:
+    repoURL: https://dev.azure.com/example-org/product-a/_git/product-a-platform-gitops
+    # main, not a tag: a dashboard change is one commit, live on the next sync.
+    targetRevision: main
+    path: dashboards/aks-product-a-prod
+  destination:
+    server: https://kubernetes.default.svc
+    # The Grafana sidecar searches exactly this namespace (searchNamespace is set
+    # explicitly in the observability chart).
+    namespace: observability
+  syncPolicy:
+    automated:
+      # PRUNE IS WANTED HERE: deleting a dashboard's JSON must remove the dashboard.
+      # It is also required by the name-suffix hashing in the kustomization: every
+      # content change produces a new ConfigMap name, and without prune the old ones
+      # would accumulate and the sidecar would serve both copies.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Independent of the observability Application: the ConfigMaps sit
+      # harmlessly until Grafana exists; the sidecar reads them when it starts.
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m

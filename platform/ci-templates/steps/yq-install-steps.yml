@@ -1,0 +1,68 @@
+# steps/yq-install-steps.yml
+#
+# Puts a pinned yq (mikefarah/yq v4) on PATH for the steps that follow. Used by the GitOps
+# record and promote steps, which edit release.yaml / image.yaml with yq instead of grep/sed/awk.
+#
+# Why a real YAML tool: the first version of the promote step read `digest:` and `version:`
+# with grep+sed and rewrote release.yaml with an awk filter that "kept every top-level key
+# except chart:". That works until somebody indents a comment, quotes a key or adds a second
+# document, and then it silently writes a wrong pin. yq edits the document tree and keeps
+# comments and hand-maintained keys.
+#
+# Unlike the scanners (Trivy, hadolint) this install FAILS CLOSED: without yq the promotion
+# cannot be written correctly, so there is nothing useful to degrade to.
+#
+# The binary is cached per agent in the tool cache and verified against the SHA-256 published
+# in the same release (`checksums` + `checksums_hashes_order`). That protects against a
+# corrupted or truncated download, not against a compromised release. To pin the hash itself,
+# pass yqSha256 (the template then refuses any other binary).
+
+parameters:
+  - name: yqVersion
+    type: string
+    default: '4.47.1'
+  # Optional: expected SHA-256 of yq_linux_amd64. Empty = verify against the release's own
+  # checksum file only.
+  - name: yqSha256
+    type: string
+    default: ''
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - bash: |
+      set -euo pipefail
+      DIR="$AGENT_TOOLSDIRECTORY/yq/$YQ_VERSION"
+      BIN="$DIR/yq"
+      if [ -x "$BIN" ] && "$BIN" --version | grep -q "v$YQ_VERSION"; then
+        echo "yq $YQ_VERSION already cached in $DIR"
+      else
+        TMP="$(mktemp -d)"
+        trap 'rm -rf "$TMP"' EXIT
+        BASE="https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}"
+        curl -fsSL -o "$TMP/yq_linux_amd64"         "$BASE/yq_linux_amd64"
+        curl -fsSL -o "$TMP/checksums"              "$BASE/checksums"
+        curl -fsSL -o "$TMP/checksums_hashes_order" "$BASE/checksums_hashes_order"
+
+        # `checksums` holds one line per asset with every hash algorithm in the order listed by
+        # `checksums_hashes_order`; find the SHA-256 column instead of assuming its position.
+        IDX="$(awk '$0 == "SHA-256" { print NR; exit }' "$TMP/checksums_hashes_order")"
+        [ -n "$IDX" ] || { echo "##vso[task.logissue type=error]No SHA-256 column in the yq release checksums."; exit 1; }
+        PUBLISHED="$(awk -v col="$((IDX + 1))" '$1 == "yq_linux_amd64" { print $col }' "$TMP/checksums")"
+        ACTUAL="$(sha256sum "$TMP/yq_linux_amd64" | awk '{ print $1 }')"
+        EXPECTED="${YQ_SHA256:-$PUBLISHED}"
+        if [ -z "$EXPECTED" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+          echo "##vso[task.logissue type=error]yq $YQ_VERSION failed its SHA-256 check (expected '$EXPECTED', got '$ACTUAL')."
+          exit 1
+        fi
+        mkdir -p "$DIR"
+        install -m 0755 "$TMP/yq_linux_amd64" "$BIN"
+      fi
+      echo "##vso[task.prependpath]$DIR"
+      "$BIN" --version
+    displayName: Install yq ${{ parameters.yqVersion }}
+    condition: ${{ parameters.condition }}
+    env:
+      YQ_VERSION: ${{ parameters.yqVersion }}
+      YQ_SHA256: ${{ parameters.yqSha256 }}

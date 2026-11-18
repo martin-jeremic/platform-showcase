@@ -1,0 +1,5 @@
+# Managed by CD (gitops-promote-steps.yml), from the CI deploy-meta artifact.
+# Do not edit by hand. The digest overrides the tag.
+image:
+  tag: "1.0.6"
+  digest: "sha256:bc5bcc5e57495bca43c1b05e574f0a8187eb10f3f14b064e28bd9b01a75ea6d9"

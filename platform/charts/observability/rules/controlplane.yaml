@@ -1,0 +1,76 @@
+# Hub control plane -- the hub-dev failure chain, end to end. HUB ONLY (gate
+# prometheusRules.files.controlplane): both rules describe the hub's microk8s
+# control plane and its single SSD.
+#
+# RAW Prometheus rule-group file, see rules/workload.yaml for how it is loaded.
+# Unit tests: rules/tests/controlplane.yaml (`promtool test rules`, run by
+# tools/check-observability.sh).
+#
+# The chain (hub-dev, single-node microk8s, node 10.0.0.10):
+#   1. The SSD is failing and stalls writes for a few seconds, 1-2x a day
+#      (PlatformNodeDiskWriteStall).
+#   2. Sometimes the stall breaks kube-apiserver's connection to its datastore,
+#      k8s-dqlite. The apiserver keeps serving from its watch cache, which no
+#      longer advances: nodes read NotReady, Argo CD stalls, unrelated alerts
+#      follow (PlatformApiserverWatchCacheStale). It does not recover by itself.
+#
+# PlatformApiserverWatchCacheStale -- why 3 s, and why `> 2`:
+#   apiserver_watch_cache_read_wait_seconds is the time a read waits for the
+#   watch cache to catch up with the requested resourceVersion. The apiserver
+#   gives up after 3 s, so a read against a stuck cache waits just over 3 s and
+#   is counted ONLY in le="+Inf" (read live: during a stale incident every
+#   finite bucket, le="3.0" included, stayed flat). histogram_quantile returns the
+#   highest finite bound for a rank in +Inf, so stale reads exactly 3. Healthy is
+#   ~0.005 (every read in the first bucket).
+#   job="apiserver" is load-bearing: kubelite is one process, so the same metric is
+#   also scraped as job kubelet, kube-scheduler and kube-controller-manager.
+#   Backtested on the hub over ten days: fired on all 5 stale periods and on
+#   nothing else.
+#
+# PlatformNodeDiskWriteStall -- average write latency of the hub SSD, in ms:
+#   write time / writes completed over 1m. Normal 1-3 ms, stalls 200-1700 ms.
+#   `for: 0m` is required: a stall is ONE 30 s scrape sample, and any `for` longer
+#   than the evaluation interval would never see it. The cluster and device are
+#   literals on purpose: this names one physical disk known to be failing, not a
+#   fleet-wide disk policy (the hub also holds the spokes' node-exporter series).
+#   Backtested over the same ten days: 9 stalls, one within 30 s before each of the 5 stale
+#   periods. Expected while the disk is in service.
+groups:
+  - name: platform.controlplane
+    rules:
+      - alert: PlatformApiserverWatchCacheStale
+        expr: |
+          histogram_quantile(0.9, sum by (cluster, le) (rate(apiserver_watch_cache_read_wait_seconds_bucket{job="apiserver"}[5m]))) > 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.cluster }} control plane is serving stale data"
+          description: >-
+            kube-apiserver on {{ $labels.cluster }} has lost its datastore (k8s-dqlite):
+            reads time out waiting for the watch cache (p90 {{ $value | humanizeDuration }};
+            healthy ~5ms, 3s = timed out), so the control plane is serving STALE data.
+            Nodes show NotReady, Argo CD stalls and unrelated alerts follow; none of them
+            is the cause. Restore it on the node, dqlite FIRST, then kubelite --
+            `sudo snap restart microk8s.daemon-k8s-dqlite && sudo snap restart microk8s.daemon-kubelite`
+            -- restarting kubelite alone does not fix it. The trigger is a hub SSD write
+            stall (PlatformNodeDiskWriteStall just before this); replacing the disk is the
+            permanent fix.
+
+      - alert: PlatformNodeDiskWriteStall
+        expr: |
+          max by (cluster, instance) (
+            1000 * rate(node_disk_write_time_seconds_total{cluster="hub-dev", device="sda"}[1m])
+                 / rate(node_disk_writes_completed_total{cluster="hub-dev", device="sda"}[1m])
+          ) > 200
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.cluster }} SSD write stall ({{ $value | humanize }} ms per write)"
+          description: >-
+            The hub SSD on {{ $labels.cluster }} ({{ $labels.instance }}) stalled writes:
+            {{ $value | humanize }} ms per write averaged over 1m (normal 1-3 ms). These
+            freezes are what break the kube-apiserver to k8s-dqlite connection; if
+            PlatformApiserverWatchCacheStale follows, the control plane is serving stale
+            data. The disk is failing: the permanent fix is replacing it.

@@ -1,0 +1,5 @@
+# observability (wave 6) is live, so the PodMonitor is on.
+reloader:
+  reloader:
+    podMonitor:
+      enabled: true

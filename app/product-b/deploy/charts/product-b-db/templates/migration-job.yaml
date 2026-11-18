@@ -1,0 +1,63 @@
+{{- /*
+Differences from product-a-db, each deliberate:
+
+* A separate migrator assembly in the API image, so the Job sets `command:` too. That is still no
+  shell: ["dotnet", "ProductB.Migrator.dll"] is exec'd directly, which the chiseled image supports.
+* Only verify | migrate. There is no seed verb: tenants are provisioned by a runbook step.
+* No "deploy past a failing migration once" switch in the pipeline. product-a has one; deploying
+  past a failed migration means running code against a schema it was not built for, and a
+  checkbox makes that a habit. A failed migration is fixed and re-run.
+* Old pods run against the new schema between this Job and the rollout. That is safe because
+  platform migrations expand before they contract, which an architecture test enforces.
+*/ -}}
+{{- if .Values.migrationJob.enabled }}
+{{- $mode := .Values.migrationJob.mode | toString }}
+{{- if not (has $mode (list "verify" "migrate")) }}
+{{- fail (printf "migrationJob.mode must be verify or migrate, got %q" $mode) }}
+{{- end }}
+{{- $image := include "pb.image" . }}
+{{- $nonce := .Values.migrationJob.runNonce | toString }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-migrate-%s-%s" (include "pb.fullname" .) (.Values.image.digest | trimPrefix "sha256:" | trunc 12) $nonce | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+    example.com/job-kind: schema-migration
+  annotations:
+    example.com/run-nonce: {{ $nonce | quote }}
+spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrationJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "pb.labels" . | nindent 8 }}
+        example.com/job-kind: schema-migration
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "pb.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "pb.containerSecurityContext" . | nindent 12 }}
+          command: ["dotnet", "ProductB.Migrator.dll"]
+          args:
+            - {{ printf "--%s" $mode | quote }}
+          env:
+            - name: DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: Database
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

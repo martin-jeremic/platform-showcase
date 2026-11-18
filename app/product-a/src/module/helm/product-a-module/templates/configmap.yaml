@@ -1,0 +1,43 @@
+{{- /*
+Explicit keys, no `range`. Required keys fail the render when empty. Optional tuning knobs are
+OMITTED when empty rather than rendered as "": envFrom would otherwise set the variable to an empty
+string, which overrides the image's ENV default (MALLOC_ARENA_MAX="" is not "unset").
+Booleans are rendered as "true"/"false", never dropped.
+*/ -}}
+{{- $c := .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "product-a-module.fullname" . }}-config
+  labels:
+    {{- include "product-a-module.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  ENVIRONMENT: {{ required "config.environment is required" $c.environment | quote }}
+  LOG_LEVEL: {{ $c.logLevel | default "INFO" | quote }}
+  LLM_DEPLOYMENT: {{ required "config.llmDeployment is required" $c.llmDeployment | quote }}
+  LLM_BASE_URL: {{ required "config.llmBaseUrl is required" $c.llmBaseUrl | quote }}
+  API_BASE_URL: {{ required "config.apiBaseUrl is required" $c.apiBaseUrl | quote }}
+  M2M_TOKEN_URL: {{ required "config.m2m.tokenUrl is required" $c.m2m.tokenUrl | quote }}
+  M2M_CLIENT_ID: {{ required "config.m2m.clientId is required" $c.m2m.clientId | quote }}
+  PROMPT_GOVERNANCE_ENABLED: {{ $c.promptGovernance.enabled | toString | quote }}
+  {{- if $c.promptGovernance.enabled }}
+  PROMPT_GOVERNANCE_BASE_URL: {{ required "config.promptGovernance.baseUrl is required when enabled" $c.promptGovernance.baseUrl | quote }}
+  {{- end }}
+  {{- with $c.capacity.llmMaxInflightPerPod }}
+  LLM_MAX_INFLIGHT_PER_POD: {{ . | quote }}
+  {{- end }}
+  {{- with $c.capacity.batchEnrichmentEnabled }}
+  BATCH_ENRICHMENT_ENABLED: {{ . | quote }}
+  {{- end }}
+  {{- with $c.tuning.gunicornMaxRequests }}
+  GUNICORN_MAX_REQUESTS: {{ . | quote }}
+  {{- end }}
+  {{- with $c.tuning.mallocArenaMax }}
+  MALLOC_ARENA_MAX: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.otel.enabled }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ required "otel.endpoint is required when otel.enabled" .Values.otel.endpoint | quote }}
+  OTEL_SERVICE_NAME: {{ include "product-a-module.fullname" . | quote }}
+  {{- end }}

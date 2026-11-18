@@ -1,0 +1,384 @@
+# stages/build-or-promote-stage.yml
+#
+# "Build once, promote by digest" for the product-a services. The branch decides the action
+# (Build.SourceBranch at runtime, through step and stage `condition:`s):
+#
+#   buildBranch (develop)  BUILD the image once with `az acr build` (x.y.z-alpha.n), optionally
+#                          scan it (Trivy, warn-only), RECORD its digest as the Dev candidate in
+#                          the GitOps repo (apps/<imageName>/dev/image.yaml), and push the chart.
+#                          Dev itself is deployed push-based by the service's CD pipeline.
+#
+#   releaseBranch (main)   NO build. Package and push the stable chart (x.y.z), then wait in the
+#                          APPROVAL-GATED Promote_Stage / Promote_Demo / Promote_Prod stages. Each
+#                          is a deployment job bound to an Azure DevOps Environment; approving it
+#                          writes digest + exact chart pin into the GitOps repo, and Argo CD
+#                          reconciles to exactly that. Approving in ADO IS the deployment.
+#
+# Promotion sources:
+#   Promote_Stage / Promote_Demo: the image recorded for Dev + the chart this main run pushed.
+#   Promote_Prod: the exact chart+image pair Stage runs. Nothing reaches Prod without Stage.
+# Approvals that are not wanted yet can be left pending (they time out per the Environment
+# check); "Rerun stage" promotes a run later. The ordering guard in gitops-promote-steps.yml
+# refuses to let an old pending run overwrite a newer pin.
+#
+# Caller prerequisites:
+#   resources.repositories: - repository: gitops   (name: product-a/product-a-gitops)
+#   a Versioning stage (versioning-gitversion.yml) - its nextVersion is the version of everything
+#   ADO Environments Stage / Demo / Production with approval checks (scripts/ado/).
+#   The build identity has Contribute on the GitOps repo.
+
+parameters:
+  - name: stageName
+    type: string
+    default: BuildOrPromote
+  - name: dependsOn
+    type: object
+    default: [Versioning]
+  # image repository == OCI chart name == apps/<imageName>/ folder in the GitOps repo
+  - name: imageName
+    type: string
+  - name: helmChartPath
+    type: string
+  - name: dockerfilePath
+    type: string
+  # `.` for services whose Dockerfile COPYs shared projects from the monorepo root.
+  - name: buildContext
+    type: string
+    default: '.'
+  # Companion chart packaged in the SAME run with the SAME version (e.g. the migration Job chart
+  # next to the API chart), so the two pins cannot diverge. secondImageName is its GitOps folder;
+  # it runs imageName's image and is recorded/promoted with the identical digest, same commit.
+  - name: secondHelmChartPath
+    type: string
+    default: ''
+  - name: secondImageName
+    type: string
+    default: ''
+  # Plain build arguments: { NAME: value }. VERSION, REVISION and SOURCE are always passed so the
+  # image carries its version and the commit it was built from as OCI labels.
+  - name: buildArgs
+    type: object
+    default: {}
+  # Secret build arguments: { NAME: $(secretVariable) }. Passed with --secret-build-arg, which ACR
+  # Tasks keep out of its logs. The Dockerfile must consume them in a builder stage only, never in
+  # the final stage, or they end up in the image history.
+  - name: secretBuildArgs
+    type: object
+    default: {}
+  # Steps to run before the image build, on the build branch only (e.g. a code generator check).
+  - name: preBuildSteps
+    type: stepList
+    default: []
+  - name: scanImage
+    type: boolean
+    default: true
+  - name: acrName
+    type: string
+    default: productacr
+  - name: armServiceConnection
+    type: string
+    default: arm-product-a
+  - name: gitopsRepoUrl
+    type: string
+    default: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+  - name: gitopsBranch
+    type: string
+    default: main
+  - name: buildBranch
+    type: string
+    default: refs/heads/develop
+  - name: releaseBranch
+    type: string
+    default: refs/heads/main
+  - name: stageEnvironmentName
+    type: string
+    default: Stage
+  - name: demoEnvironmentName
+    type: string
+    default: Demo
+  - name: prodEnvironmentName
+    type: string
+    default: Production
+  # Passed to every Promote_* stage. Usually wired to a runtime parameter of the caller and left
+  # false; set it for one run to roll an environment back on purpose.
+  - name: allowDowngrade
+    type: boolean
+    default: false
+  - name: helmVersion
+    type: string
+    default: '4.2.0'
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  # ───────────────────────────────────────────────────────────────────────────────────────────
+  # build branch: build + scan + record + chart.  release branch: chart only.
+  # ───────────────────────────────────────────────────────────────────────────────────────────
+  - stage: ${{ parameters.stageName }}
+    displayName: Build image + push chart (develop) / push chart (main)
+    dependsOn: ${{ parameters.dependsOn }}
+    variables:
+      version: $[ stageDependencies.Versioning.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+      isBuildBranch: $[ eq(variables['Build.SourceBranch'], '${{ parameters.buildBranch }}') ]
+    jobs:
+      - job: BuildOrPromote
+        displayName: Build image / push Helm chart
+        # "Protect access to repositories in YAML pipelines" is ON: the job token only covers
+        # repositories the job explicitly `uses`. Declaring the resource at pipeline level is not
+        # enough; without this the GitOps clone fails with TF401019. The alias `gitops` must be
+        # declared by the caller under resources.repositories.
+        uses:
+          repositories:
+            - gitops
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            # Depth 0 ON PURPOSE, here and in every job of a CI pipeline: all jobs of one run share
+            # the agent's work folder, and a shallow fetch by ANY job leaves the repository shallow
+            # for the GitVersion job, which then fails with "The repository is shallow". (Seen the
+            # day fetchDepth: 1 was tried here to save a few seconds.) The GitOps repo is cloned
+            # separately, with --depth 1.
+            fetchDepth: 0
+
+          # No fallback version. An empty version used to become "0.1.<BuildId>", a chart and an
+          # image nobody could trace back to a commit or a release.
+          - bash: |
+              set -euo pipefail
+              [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]The Versioning stage produced no version."; exit 1; }
+              echo "Branch $(Build.SourceBranch), version $VERSION, build branch: $IS_BUILD_BRANCH"
+            displayName: Check version
+            env:
+              VERSION: $(version)
+              IS_BUILD_BRANCH: $(isBuildBranch)
+
+          - task: HelmInstaller@1
+            displayName: Install Helm ${{ parameters.helmVersion }}
+            inputs:
+              helmVersionToInstall: ${{ parameters.helmVersion }}
+
+          # Pre-build steps, re-emitted with a build-branch condition (any condition the caller set
+          # is replaced, so the step cannot accidentally run on main).
+          - ${{ each step in parameters.preBuildSteps }}:
+            - ${{ each pair in step }}:
+                ${{ if ne(pair.key, 'condition') }}:
+                  ${{ pair.key }}: ${{ pair.value }}
+              condition: and(succeeded(), eq(variables['isBuildBranch'], 'True'))
+
+          # ── Why the build, the scan and the digest record are SEPARATE AzureCLI tasks ──────
+          # The ARM service connection uses workload identity federation: AzureCLI@2 logs in with a
+          # federated client assertion that Entra ID caps at 10 MINUTES, not configurable, and every
+          # `az` call inside ONE task shares that single login. `az acr build` routinely runs longer
+          # (context upload + a multi-stage .NET build), so an `az acr repository show` in the same
+          # task fired ~17 minutes after login and died with AADSTS700024 "Client assertion is not
+          # within its valid time range". The registry's admin user is disabled, deliberately, so
+          # there was no fallback.
+          # The image had built and pushed fine; only the digest lookup and the GitOps record were
+          # lost: a red stage with a good image in the registry and no Dev candidate recorded.
+          # Split, every task gets a FRESH assertion. Keep them split; merging them back brings
+          # the failure back, and only for builds that cross ~9 minutes.
+          #
+          # `az acr build` builds inside the registry: the agents need no Docker daemon, and the
+          # image never exists on the agent. Only the version tag is pushed; there is no `:latest`
+          # (a mutable tag that every environment would read differently over time).
+          - task: AzureCLI@2
+            displayName: Build image in the registry (az acr build)
+            condition: and(succeeded(), eq(variables['isBuildBranch'], 'True'))
+            env:
+              ACR_NAME: ${{ parameters.acrName }}
+              IMAGE: ${{ parameters.imageName }}
+              VERSION: $(version)
+              DOCKERFILE: ${{ parameters.dockerfilePath }}
+              BUILD_CONTEXT: ${{ parameters.buildContext }}
+              BUILDARG_VERSION: $(version)
+              BUILDARG_REVISION: $(Build.SourceVersion)
+              BUILDARG_SOURCE: $(Build.Repository.Uri)
+              ${{ each arg in parameters.buildArgs }}:
+                BUILDARG_${{ arg.key }}: ${{ arg.value }}
+              ${{ each arg in parameters.secretBuildArgs }}:
+                SECRETARG_${{ arg.key }}: ${{ arg.value }}
+            inputs:
+              azureSubscription: ${{ parameters.armServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                # Arguments are assembled from environment variables, never spliced into the script
+                # text, so a value with quotes or `$(...)` stays a value.
+                ARGS=()
+                for name in $(compgen -e); do
+                  case "$name" in
+                    BUILDARG_*)  ARGS+=(--build-arg "${name#BUILDARG_}=${!name}") ;;
+                    SECRETARG_*) ARGS+=(--secret-build-arg "${name#SECRETARG_}=${!name}") ;;
+                  esac
+                done
+                az acr build \
+                  --registry "$ACR_NAME" \
+                  --image "$IMAGE:$VERSION" \
+                  --file "$DOCKERFILE" \
+                  "${ARGS[@]}" \
+                  "$BUILD_CONTEXT"
+
+          - ${{ if parameters.scanImage }}:
+            - template: ../steps/trivy-scan-steps.yml
+              parameters:
+                scanType: image
+                imageName: ${{ parameters.imageName }}
+                version: $(version)
+                acrName: ${{ parameters.acrName }}
+                armServiceConnection: ${{ parameters.armServiceConnection }}
+                reportName: ${{ parameters.imageName }}
+                condition: and(succeeded(), eq(variables['isBuildBranch'], 'True'))
+
+          - template: ../steps/gitops-record-steps.yml
+            parameters:
+              imageName: ${{ parameters.imageName }}
+              pairedImageName: ${{ parameters.secondImageName }}
+              version: $(version)
+              acrName: ${{ parameters.acrName }}
+              armServiceConnection: ${{ parameters.armServiceConnection }}
+              gitopsRepoUrl: ${{ parameters.gitopsRepoUrl }}
+              gitopsBranch: ${{ parameters.gitopsBranch }}
+              targetEnv: dev
+              condition: and(succeeded(), eq(variables['isBuildBranch'], 'True'))
+
+          # The chart version is stamped by `helm package`, not by editing Chart.yaml in place:
+          # the working tree stays clean, and the packaged chart is the only thing that carries the
+          # version. Both charts get the identical version in the same job, so a service chart and
+          # its companion can never be pushed at different versions.
+          - bash: |
+              set -euo pipefail
+              OUT="$BUILD_ARTIFACTSTAGINGDIRECTORY/charts"
+              mkdir -p "$OUT"
+              for chart in "$CHART_1" ${CHART_2:+"$CHART_2"}; do
+                helm package "$chart" --version "$VERSION" --app-version "$VERSION" --destination "$OUT"
+              done
+              ls -1 "$OUT"
+            displayName: Package chart(s) at $(version)
+            env:
+              VERSION: $(version)
+              CHART_1: ${{ parameters.helmChartPath }}
+              CHART_2: ${{ parameters.secondHelmChartPath }}
+
+          - task: AzureCLI@2
+            displayName: Push chart(s) to the registry (OCI)
+            env:
+              ACR_NAME: ${{ parameters.acrName }}
+            inputs:
+              azureSubscription: ${{ parameters.armServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                REGISTRY="$ACR_NAME.azurecr.io"
+                az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv \
+                  | helm registry login "$REGISTRY" --username 00000000-0000-0000-0000-000000000000 --password-stdin
+                found=0
+                for pkg in "$BUILD_ARTIFACTSTAGINGDIRECTORY"/charts/*.tgz; do
+                  [ -f "$pkg" ] || continue
+                  helm push "$pkg" "oci://$REGISTRY/helm"
+                  found=$((found + 1))
+                done
+                [ "$found" -gt 0 ] || { echo "##vso[task.logissue type=error]No chart package was produced."; exit 1; }
+                helm registry logout "$REGISTRY" || true
+
+  # ───────────────────────────────────────────────────────────────────────────────────────────
+  # release branch only: approval-gated promotions. Nothing deploys without an approval.
+  # ───────────────────────────────────────────────────────────────────────────────────────────
+  - stage: Promote_Stage
+    displayName: Promote to Stage (approve in ADO)
+    dependsOn:
+      - Versioning
+      - ${{ parameters.stageName }}
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], '${{ parameters.releaseBranch }}'))
+    variables:
+      version: $[ stageDependencies.Versioning.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+    jobs:
+      - deployment: Promote
+        displayName: Dev image + this run's chart -> Stage
+        environment: ${{ parameters.stageEnvironmentName }}
+        uses:
+          repositories:
+            - gitops
+        pool: ${{ parameters.pool }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+                - download: none
+                - template: ../steps/gitops-promote-steps.yml
+                  parameters:
+                    appName: ${{ parameters.imageName }}
+                    pairedAppName: ${{ parameters.secondImageName }}
+                    targetEnv: stage
+                    sourceEnv: dev
+                    chartVersion: $(version)
+                    allowDowngrade: ${{ parameters.allowDowngrade }}
+                    gitopsRepoUrl: ${{ parameters.gitopsRepoUrl }}
+                    gitopsBranch: ${{ parameters.gitopsBranch }}
+
+  - stage: Promote_Demo
+    displayName: Promote to Demo (approve in ADO)
+    dependsOn:
+      - Versioning
+      - ${{ parameters.stageName }}
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], '${{ parameters.releaseBranch }}'))
+    variables:
+      version: $[ stageDependencies.Versioning.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+    jobs:
+      - deployment: Promote
+        displayName: Dev image + this run's chart -> Demo
+        environment: ${{ parameters.demoEnvironmentName }}
+        uses:
+          repositories:
+            - gitops
+        pool: ${{ parameters.pool }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+                - download: none
+                - template: ../steps/gitops-promote-steps.yml
+                  parameters:
+                    appName: ${{ parameters.imageName }}
+                    pairedAppName: ${{ parameters.secondImageName }}
+                    targetEnv: demo
+                    sourceEnv: dev
+                    chartVersion: $(version)
+                    allowDowngrade: ${{ parameters.allowDowngrade }}
+                    gitopsRepoUrl: ${{ parameters.gitopsRepoUrl }}
+                    gitopsBranch: ${{ parameters.gitopsBranch }}
+
+  # Prod copies the exact pair Stage runs (empty chartVersion = read stage/release.yaml), so it is
+  # only reachable after Promote_Stage.
+  - stage: Promote_Prod
+    displayName: Promote to Prod (approve in ADO)
+    dependsOn:
+      - Promote_Stage
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], '${{ parameters.releaseBranch }}'))
+    jobs:
+      - deployment: Promote
+        displayName: Stage image + chart -> Prod
+        environment: ${{ parameters.prodEnvironmentName }}
+        uses:
+          repositories:
+            - gitops
+        pool: ${{ parameters.pool }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+                - download: none
+                - template: ../steps/gitops-promote-steps.yml
+                  parameters:
+                    appName: ${{ parameters.imageName }}
+                    pairedAppName: ${{ parameters.secondImageName }}
+                    targetEnv: prod
+                    sourceEnv: stage
+                    allowDowngrade: ${{ parameters.allowDowngrade }}
+                    gitopsRepoUrl: ${{ parameters.gitopsRepoUrl }}
+                    gitopsBranch: ${{ parameters.gitopsBranch }}

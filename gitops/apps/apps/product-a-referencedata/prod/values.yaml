@@ -1,0 +1,84 @@
+# Prod env config for product-a-referencedata (CronJobs + seed Jobs), cluster aks-product-a-prod (island, in-cluster Argo CD).
+# Non-sensitive only: secrets come from kv-product-a-prod through the Secrets Store CSI driver. Safe to commit.
+# The image digest comes from prod/image.yaml (listed after this file). Batch only: no route.
+#
+# Every key the chart reads per environment is STATED here, never inherited from a chart default
+# (scripts/check-configmaps.py enforces it). Silence is not a decision.
+
+# ── Identity and secrets ─────────────────────────────────────────────────────────────────────
+# Workload identity: the pod's service account is federated with ONE user-assigned identity per
+# app and environment, which holds Key Vault Secrets User on kv-product-a-prod and nothing else.
+# Replaces node (kubelet) identity, which every pod on the node shared and which could read the
+# WHOLE vault.
+workloadIdentity:
+  enabled: true
+  clientId: "44444444-dddd-0000-0000-000000000000"   # per environment; NOT the object id of the identity
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-prod
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+# Mandatory Key Vault objects: product-a-referencedata--database (WRITER role) and
+# product-a-referencedata--broker-password.
+
+# No pull secret: the kubelet identity holds AcrPull on the registry. A dangling reference only
+# produced FailedToRetrieveImagePullSecret warnings on every pod.
+imagePullSecrets: []
+
+# Shared by the seed Jobs and every dataset CronJob. A load holds the whole source download plus
+# the parsed rows in memory; 512Mi killed the largest dataset with an out-of-memory error.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 250m
+    memory: 1Gi
+
+# CronJob behaviour: never two loads of one dataset at once, and keep a short history.
+cronDefaults:
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+# Load every dataset once on each deploy, so a fresh environment is usable without waiting for
+# the schedules. The loads are idempotent (content-addressed releases).
+seedOnDeploy:
+  enabled: true
+
+# One CronJob per dataset, written out key by key (the charts do not `range` over values).
+# Staggered so the loads never start together.
+datasets:
+  countries:
+    enabled: true
+    schedule: "15 7 * * 1"    # weekly, Mon 07:15
+  currencies:
+    enabled: true
+    schedule: "30 7 * * 1"    # weekly, Mon 07:30
+  locations:
+    enabled: true
+    schedule: "0 2 1 1,7 *"   # half-yearly
+  commodityCodes:
+    enabled: true
+    schedule: "0 2 1 1 *"     # yearly
+
+nodeSelector: { agentpool: workload }
+tolerations: []
+
+# OpenTelemetry endpoint: standalone observability on this cluster.
+otel:
+  enabled: true
+  endpoint: http://alloy.monitoring.svc.cluster.local:4317
+
+config:
+  environment: "Production"
+  logLevel: "Information"
+  broker:
+    host: "rabbitmq.rabbitmq.svc.cluster.local"
+    port: "5672"
+    virtualHost: "/product-a"
+    username: "product-a-referencedata-prod"
+  # Published after every successful load; the API consumes it to refresh its caches.
+  updatedEventExchange: "reference-data"

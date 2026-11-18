@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'cluster-test' to 'aks-product-a-prod'.
+chartPath:     cluster-test
+chartRevision: cluster-test-1.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   cluster-test
+namespace:     cluster-test
+syncWave:      "5"

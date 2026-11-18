@@ -1,0 +1,28 @@
+<Project>
+  <!--
+    Applied to every .csproj under this monorepo, so the project files stay thin.
+
+    Every .NET Dockerfile COPYs this file before `dotnet restore`. Without it the image compiled
+    with different properties than CI's own `dotnet build` of the same commit, which is the kind
+    of difference nobody finds until a nullable warning behaves differently in production.
+  -->
+  <PropertyGroup>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <!-- Source paths in PDBs become /_/... on the build agent, so two agents produce the same bytes. -->
+    <ContinuousIntegrationBuild Condition="'$(TF_BUILD)' == 'true'">true</ContinuousIntegrationBuild>
+    <!--
+      Warnings are NOT errors in this monorepo: it predates the rule and carries a backlog of them.
+      product-b (built later, from scratch) turns it on from day one; see its Directory.Build.props.
+    -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!--
+      packages.lock.json per project. The shared PR stage restores in locked mode, so a dependency
+      that changed without its lock file fails the pull request instead of drifting silently.
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+</Project>

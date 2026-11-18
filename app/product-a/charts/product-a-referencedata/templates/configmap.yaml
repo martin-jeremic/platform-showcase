@@ -1,0 +1,22 @@
+{{- $c := .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "refdata.fullname" . }}-config
+  labels:
+    {{- include "refdata.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  Environment: {{ required "config.environment is required" $c.environment | quote }}
+  Logging__LogLevel__Default: {{ $c.logLevel | default "Information" | quote }}
+  Broker__Host: {{ required "config.broker.host is required" $c.broker.host | quote }}
+  Broker__Port: {{ $c.broker.port | toString | quote }}
+  Broker__VirtualHost: {{ $c.broker.virtualHost | quote }}
+  Broker__Username: {{ required "config.broker.username is required" $c.broker.username | quote }}
+  RefData__UpdatedEventExchange: {{ required "config.updatedEventExchange is required" $c.updatedEventExchange | quote }}
+  RefData__StagingRootPath: /app/staging
+  {{- if .Values.otel.enabled }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ required "otel.endpoint is required when otel.enabled" .Values.otel.endpoint | quote }}
+  OTEL_SERVICE_NAME: {{ include "refdata.fullname" . | quote }}
+  {{- end }}

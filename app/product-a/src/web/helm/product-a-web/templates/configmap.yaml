@@ -1,0 +1,22 @@
+{{- /*
+env.js is built here from explicit, required keys, each value JSON-encoded with toJson, so a value
+can never break out of the string it sits in. No free-form blob, no Base64.
+*/ -}}
+{{- $c := .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "product-a-web.fullname" . }}-config
+  labels:
+    {{- include "product-a-web.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  env.js: |
+    window.__env = {
+      environment: {{ required "config.environment is required" $c.environment | toJson }},
+      apiBaseUrl: {{ required "config.apiBaseUrl is required" $c.apiBaseUrl | toJson }},
+      oidcAuthority: {{ required "config.oidcAuthority is required" $c.oidcAuthority | toJson }},
+      oidcClientId: {{ required "config.oidcClientId is required" $c.oidcClientId | toJson }},
+      oidcScope: {{ required "config.oidcScope is required" $c.oidcScope | toJson }}
+    };

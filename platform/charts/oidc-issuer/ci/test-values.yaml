@@ -1,0 +1,5 @@
+gateway:
+  name: traefik-gateway
+  namespace: traefik
+route:
+  hostname: dev.example.com

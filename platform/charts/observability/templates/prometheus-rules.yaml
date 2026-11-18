@@ -1,0 +1,50 @@
+{{- /*
+Alerts as code: every rules/*.yaml is a RAW Prometheus rule-group file
+(top-level `groups:`), so each is checkable on its own with
+`promtool check rules rules/<file>.yaml`. Each file becomes one
+PrometheusRule, platform-alerts-<file>.
+
+Loaded with .Files.Get, NOT tpl: Prometheus template syntax in annotations
+($labels / $value inside double braces) passes through untouched.
+
+Gated PER FILE by prometheusRules.files.<file> (see values.yaml for why). Both
+directions are checked, so neither mistake is silent:
+  - a rules file with no gate key fails the render (a new file cannot ship
+    undeployed by accident);
+  - a gate key with no rules file fails the render (a typo in a cluster values
+    file cannot silently disable a file).
+
+Selection: ruleSelectorNilUsesHelmValues: false in values.yaml, so Prometheus
+selects these with no release label. File base names become resource-name
+suffixes -- keep them DNS-1123 (lowercase, hyphens).
+*/}}
+{{- if .Values.prometheusRules.enabled }}
+{{- $gates := .Values.prometheusRules.files | default dict }}
+{{- $files := dict }}
+{{- range $path, $_ := .Files.Glob "rules/*.yaml" }}
+{{- $_ := set $files (base $path | trimSuffix ".yaml") $path }}
+{{- end }}
+{{- range $name, $_ := $gates }}
+{{- if not (hasKey $files $name) }}
+{{- fail (printf "prometheusRules.files.%s is set, but rules/%s.yaml does not exist (typo?). Files: %s" $name $name (keys $files | sortAlpha | join ", ")) }}
+{{- end }}
+{{- end }}
+{{- range $name := keys $files | sortAlpha }}
+{{- if not (hasKey $gates $name) }}
+{{- fail (printf "rules/%s.yaml has no gate: add prometheusRules.files.%s (true or false) to values.yaml" $name $name) }}
+{{- end }}
+{{- if index $gates $name }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-alerts-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "observability.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: alert-rules
+spec:
+{{ $.Files.Get (index $files $name) | indent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}

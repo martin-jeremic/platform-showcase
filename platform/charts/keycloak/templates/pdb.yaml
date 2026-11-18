@@ -1,0 +1,26 @@
+{{- /*
+PodDisruptionBudget.
+
+maxUnavailable: 1 on a 2-replica deployment means a node drain or cluster upgrade
+takes Keycloak to one replica, never to zero. That matters more here than for most
+components: Keycloak is in the login path for ArgoCD, Grafana and the application, so
+zero replicas is a total authentication outage for everything at once.
+
+Note the interaction with the hard topology spread: with 2 replicas pinned to
+different nodes and maxUnavailable: 1, draining one infra node evicts one replica and
+the other keeps serving. Draining BOTH infra nodes at once is blocked by this budget,
+which is the intended behaviour -- it forces a serial drain.
+*/ -}}
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "keycloak.fullname" . }}
+  labels:
+    {{- include "keycloak.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "keycloak.selectorLabels" . | nindent 6 }}
+{{- end }}

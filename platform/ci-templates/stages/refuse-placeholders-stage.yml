@@ -1,0 +1,47 @@
+# stages/refuse-placeholders-stage.yml
+#
+# Deploy-time guard. Values files may be committed with <<NAME>> markers for facts still to be
+# filled in (a hostname nobody has allocated yet, a client id not yet created). This stage fails
+# the deploy, naming file, line and marker, while any marker remains. An unfilled value therefore
+# never reaches the cluster, where it would surface only as a pod that refuses to start, or worse,
+# one that starts with a literal "<<KEYCLOAK_REALM>>" in its config.
+#
+# It runs in deploy pipelines and NOT in PR pipelines, deliberately: pull requests stay green
+# while the facts are being gathered.
+
+parameters:
+  - name: stageName
+    type: string
+    default: RefusePlaceholders
+  - name: dependsOn
+    type: object
+    default: []
+  - name: valuesFiles
+    type: object
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Refuse unfilled placeholders
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: Check
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - ${{ each file in parameters.valuesFiles }}:
+            - bash: |
+                set -euo pipefail
+                [ -f "$VALUES_FILE" ] || { echo "##vso[task.logissue type=error]$VALUES_FILE does not exist."; exit 1; }
+                if grep -nE '<<[A-Z0-9_]*>>' "$VALUES_FILE"; then
+                  echo "##vso[task.logissue type=error]$VALUES_FILE still holds the placeholder(s) above. Fill them in before deploying."
+                  exit 1
+                fi
+                echo "$VALUES_FILE: no placeholders."
+              displayName: ${{ file }}
+              env:
+                VALUES_FILE: ${{ file }}

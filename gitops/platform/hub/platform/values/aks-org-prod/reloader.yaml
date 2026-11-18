@@ -1,0 +1,10 @@
+# Single-node cluster: the hard topology spread (DoNotSchedule) would leave every
+# second replica Pending, so this cluster runs one replica of each and no PDB.
+reloader:
+  reloader:
+    deployment:
+      replicas: 1
+    podDisruptionBudget:
+      enabled: false
+    podMonitor:
+      enabled: true

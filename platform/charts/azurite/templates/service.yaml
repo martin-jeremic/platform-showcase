@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "azurite.fullname" . }}
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  # On MetalLB clusters the VIP is requested here, via
+  #   metallb.io/loadBalancerIPs: <ip>
+  # rather than through spec.loadBalancerIP (deprecated upstream since k8s 1.24).
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.loadBalancerIP }}
+  {{- end }}
+  selector:
+    {{- include "azurite.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: blob
+      port: {{ .Values.service.blobPort }}
+      targetPort: blob
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePorts.blob }}
+      nodePort: {{ .Values.service.nodePorts.blob }}
+      {{- end }}
+    - name: queue
+      port: {{ .Values.service.queuePort }}
+      targetPort: queue
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePorts.queue }}
+      nodePort: {{ .Values.service.nodePorts.queue }}
+      {{- end }}
+    - name: table
+      port: {{ .Values.service.tablePort }}
+      targetPort: table
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePorts.table }}
+      nodePort: {{ .Values.service.nodePorts.table }}
+      {{- end }}

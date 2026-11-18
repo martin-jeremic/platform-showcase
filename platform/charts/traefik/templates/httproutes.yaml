@@ -1,0 +1,33 @@
+{{- /*
+Optional HTTPRoutes rendered by this chart. Every route binds to the `websecure`
+listener unless its parentRef names another one: a route with no sectionName binds
+to EVERY listener -- including plaintext `web`, where it ties with the redirect
+route (see redirect-httproute.yaml).
+*/ -}}
+{{- $gwName := .Values.gateway.name -}}
+{{- $gwNs := include "platform-traefik.gatewayNamespace" . -}}
+{{- $secure := .Values.gateway.listeners.websecure.name -}}
+{{- range $r := .Values.httpRoutes }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $r.name }}
+  namespace: {{ default $.Release.Namespace $r.namespace }}
+  labels:
+    {{- include "platform-traefik.labels" $ | nindent 4 }}
+spec:
+  parentRefs:
+    {{- $p := $r.parentRef | default dict }}
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ default $gwName $p.name }}
+      namespace: {{ default $gwNs $p.namespace }}
+      sectionName: {{ default $secure $p.sectionName }}
+  {{- with $r.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- toYaml $r.rules | nindent 4 }}
+{{- end }}

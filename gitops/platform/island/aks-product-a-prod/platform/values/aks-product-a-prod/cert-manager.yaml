@@ -1,0 +1,2 @@
+# Two infra nodes (min_count 2): the chart's HA defaults apply as they are.
+{}

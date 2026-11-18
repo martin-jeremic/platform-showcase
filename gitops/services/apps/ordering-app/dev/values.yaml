@@ -1,0 +1,51 @@
+# Non-secret dev overrides for the ordering-app chart, release ordering-app, cluster hub-dev (the hub itself, in-cluster).
+# Hand-maintained: the CD promotion never touches this file (it writes image.yaml and moves
+# chart.version in release.yaml only).
+
+# ── Routing: path-per-app on the single host dev.example.com (README, path allocation) ──
+# sectionName pins the route to the TLS listener; without it the route also binds the plain-HTTP
+# listener and the app answers on :80. Listener hostnames match EXACTLY: a stale per-app hostname
+# reports NoMatchingParent while Argo still shows Synced/Healthy.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: true
+  hostnames:
+    - dev.example.com
+  path: /ordering
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+# On-prem hub: images are pulled with the namespace pull secret.
+imagePullSecrets:
+  - name: orgacr-pull
+
+# ── Runtime configuration (no rebuild per environment) ───────────────────────────────────────
+# The chart renders `env` into a ConfigMap mounted as environment variables; the image's
+# entrypoint.sh writes them to assets/config.json before nginx starts, and the app fetches that
+# file at boot. One image, every environment: promote-by-digest stays true for SPAs.
+# What is NOT runtime: the base path (/ordering/) is baked into the bundle at build time, so moving
+# the route without rebuilding the image 404s every asset.
+env:
+  IDENTITY_URL: "https://dev.example.com/keycloak/realms/org-test"
+  IDENTITY_CLIENT: "ordering-app"
+  # Must match the route exactly: the identity provider compares redirect URIs byte for byte.
+  IDENTITY_REDIRECT_URI: "https://dev.example.com/ordering/"
+  IDENTITY_SCOPE: "openid profile email"
+  API_URL: "https://dev.example.com/ordering-api"
+
+# ── Capacity ─────────────────────────────────────────────────────────────────────────────────
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi

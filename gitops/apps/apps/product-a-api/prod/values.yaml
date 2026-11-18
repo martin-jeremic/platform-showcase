@@ -1,0 +1,135 @@
+# Prod env config for product-a-api (.NET API), cluster aks-product-a-prod (island, in-cluster Argo CD).
+# Non-sensitive only: secrets come from kv-product-a-prod through the Secrets Store CSI driver. Safe to commit.
+# The image digest comes from prod/image.yaml (listed after this file in the Application).
+#
+# Every key the chart reads per environment is STATED here, never inherited from a chart default
+# (scripts/check-configmaps.py enforces it). Silence is not a decision.
+
+# ── Identity and secrets ─────────────────────────────────────────────────────────────────────
+# Workload identity: the pod's service account is federated with ONE user-assigned identity per
+# app and environment, which holds Key Vault Secrets User on kv-product-a-prod and nothing else.
+# Replaces node (kubelet) identity, which every pod on the node shared and which could read the
+# WHOLE vault.
+workloadIdentity:
+  enabled: true
+  clientId: "44444444-aaaa-0000-0000-000000000000"   # per environment; NOT the object id of the identity
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-prod
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+# Mandatory Key Vault objects: product-a-api--database, product-a-api--identity-client-secret,
+# product-a-api--broker-password, and (only while config.blobStorage.enabled is true)
+# product-a-api--blob-connection. A CONFIG flag can make a SECRET mandatory: the CSI driver fails
+# the whole mount when one declared object is missing, leaving the pod in ContainerCreating.
+
+# No pull secret: the kubelet identity holds AcrPull on the registry. A dangling reference only
+# produced FailedToRetrieveImagePullSecret warnings on every pod.
+imagePullSecrets: []
+
+image:
+  # Digest-pinned, so there is nothing to re-pull on every start.
+  pullPolicy: IfNotPresent
+
+# ── Routing (Gateway API) ────────────────────────────────────────────────────────────────────
+# sectionName pins the route to the TLS listener. Without it the route also binds the plain-HTTP
+# listener and the service answers on :80. Listener hostnames match EXACTLY: a route on any other
+# host cannot attach, and Argo still shows Synced/Healthy while it reports NoMatchingParent.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+
+route:
+  enabled: true
+  hostnames:
+    - app.product-a.example.net
+  path: /api
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+  # No `tls:` block. TLS terminates on the Gateway's websecure listener; the chart never read
+  # route.tls, so the secret name the first prod values carried guaranteed nothing.
+
+# ── Scaling, health, placement (owned per env) ───────────────────────────────────────────────
+replicaCount: 2
+
+# While enabled is false the Deployment uses replicaCount. Turning it on makes replicaCount inert:
+# the HPA owns the replica count from then on.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# startupProbe: failureThreshold x periodSeconds is the boot budget before the kubelet kills the
+# pod. readinessProbe gates Service endpoints. livenessProbe RESTARTS the container, so it stays
+# off unless the service can genuinely wedge.
+startupProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 5
+  failureThreshold: 30
+readinessProbe:
+  enabled: true
+  path: /health/ready
+  periodSeconds: 10
+  failureThreshold: 3
+livenessProbe:
+  enabled: false
+  path: /health/live
+  periodSeconds: 30
+  failureThreshold: 3
+
+nodeSelector: { agentpool: workload }
+tolerations: []
+# Two replicas: prefer different nodes so one node drain never takes both.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: product-a-api
+
+# OpenTelemetry endpoint: standalone observability on this cluster.
+otel:
+  enabled: true
+  endpoint: http://alloy.monitoring.svc.cluster.local:4317
+
+# ── ConfigMap (the whole non-secret configuration) ───────────────────────────────────────────
+# Rendered into a ConfigMap with .NET Section__Key names; Reloader rolls the pods when it changes.
+# Written in readable form. Where a binder expects Base64 the chart encodes at render time; never
+# paste pre-encoded values here (they would be encoded twice).
+config:
+  environment: "Production"
+  logLevel: "Information"
+  identity:
+    authority: "https://app.product-a.example.net/keycloak/realms/product-a"
+    audience: "product-a-api"
+    clientId: "product-a-api"
+  broker:
+    host: "rabbitmq.rabbitmq.svc.cluster.local"
+    port: "5672"
+    virtualHost: "/product-a"
+    username: "product-a-prod"
+  moduleBaseUrl: "http://product-a-module"
+  blobStorage:
+    enabled: true
+    accountUrl: "https://stproductaprod.blob.core.windows.net"
+    container: "documents"
+  adminOperations:
+    # Gates destructive admin endpoints (tenant purge, re-index). Off outside stage.
+    enabled: false

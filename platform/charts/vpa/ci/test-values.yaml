@@ -1,0 +1,3 @@
+# CI values: the hub (defaults are the hub shape).
+vpa:
+  enabled: true

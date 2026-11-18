@@ -1,0 +1,62 @@
+{{- /*
+Grafana dashboards: one ConfigMap per dashboards/<Folder>/<name>.json.
+
+Delivered by the kube-prometheus-stack Grafana dashboard sidecar, which imports
+every ConfigMap in its own namespace carrying its discovery label. The label key
+and value, and the folder annotation key, are READ from
+kubePromStack.grafana.sidecar.dashboards rather than restated here, so this
+template cannot drift from what the sidecar actually watches.
+
+  directory name -> Grafana folder (the folder annotation)
+  file name      -> ConfigMap name suffix: grafana-dashboard-<folder>-<name>
+
+JSON is loaded raw with .Files.Get (no tpl), so `$var` references and
+legend formats in double braces pass through untouched.
+
+Gated per folder by dashboards.folders.<Folder>, checked in both directions
+like prometheus-rules.yaml: a folder with no key, or a key with no folder,
+fails the render.
+
+Replaces the one-template-per-dashboard files of chart 2.0.0. ConfigMap names
+changed with it; the dashboards themselves are keyed by `uid`, which did not,
+so the sidecar replaces rather than duplicates them once Argo prunes the old
+ConfigMaps.
+*/}}
+{{- $sc := .Values.kubePromStack.grafana.sidecar.dashboards }}
+{{- $label := required "kubePromStack.grafana.sidecar.dashboards.label is required" $sc.label }}
+{{- $folderKey := required "kubePromStack.grafana.sidecar.dashboards.folderAnnotation is required: without it every dashboard lands in General" $sc.folderAnnotation }}
+{{- $gates := .Values.dashboards.folders | default dict }}
+{{- $found := dict }}
+{{- range $path, $_ := .Files.Glob "dashboards/*/*.json" }}
+{{- $_ := set $found (base (dir $path)) true }}
+{{- end }}
+{{- range $folder, $_ := $gates }}
+{{- if not (hasKey $found $folder) }}
+{{- fail (printf "dashboards.folders.%s is set, but dashboards/%s/ has no *.json (typo?). Folders: %s" $folder $folder (keys $found | sortAlpha | join ", ")) }}
+{{- end }}
+{{- end }}
+{{- range $folder := keys $found | sortAlpha }}
+{{- if not (hasKey $gates $folder) }}
+{{- fail (printf "dashboards/%s/ has no gate: add dashboards.folders.%s (true or false) to values.yaml" $folder $folder) }}
+{{- end }}
+{{- end }}
+{{- range $path, $_ := .Files.Glob "dashboards/*/*.json" }}
+{{- $folder := base (dir $path) }}
+{{- if index $gates $folder }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-{{ $folder | lower }}-{{ base $path | trimSuffix ".json" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{ $label }}: {{ $sc.labelValue | quote }}
+    app.kubernetes.io/part-of: observability
+    {{- include "observability.labels" $ | nindent 4 }}
+  annotations:
+    {{ $folderKey }}: {{ $folder | quote }}
+data:
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

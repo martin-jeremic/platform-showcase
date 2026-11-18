@@ -1,0 +1,5 @@
+oidc:
+  issuerUrl: https://services.example.com/keycloak/realms/org
+httpRoute:
+  hostnames:
+    - services.example.com

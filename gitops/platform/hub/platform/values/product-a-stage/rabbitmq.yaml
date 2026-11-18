@@ -1,0 +1,11 @@
+azureKeyVault:
+  authMode: servicePrincipal
+  credentialsSecretName: secrets-store-creds
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  keyvaultName: kv-product-a-stage
+persistence:
+  storageClass: platform-retain
+# The agent scrapes the broker pod directly; there is no Prometheus Operator here.
+metrics:
+  serviceMonitor:
+    enabled: false

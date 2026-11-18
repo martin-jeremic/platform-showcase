@@ -1,0 +1,6 @@
+apiVersion: v2
+name: product-b-mcp
+description: Product B mcp (stub chart; deploy-model highlights only).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

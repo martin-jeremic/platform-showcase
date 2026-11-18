@@ -1,0 +1,59 @@
+# steps/trivy-install-steps.yml
+#
+# Make the pinned Trivy release available and expose its directory as the variable `trivyDir`
+# (env TRIVYDIR) to the steps that follow. The CI image scan and the PR filesystem scan both use
+# it, so they run the same version from ONE pin.
+#
+# Trivy is not preinstalled on the self-hosted agents: the release is downloaded once per agent
+# into the tool cache, verified against the SHA-256 below, and reused. Besides the binary it keeps
+# contrib/junit.tpl, the template the scans use to publish findings to the Tests tab. To upgrade,
+# change BOTH the version and the checksum (release asset trivy_<version>_checksums.txt).
+#
+# A failed download, checksum or unpack is a WARNING and leaves `trivyDir` unset; the scan steps
+# then report "NOT scanned" themselves. This step never fails the job: the scan is warn-only by
+# decision, and a scanner outage must not block a release.
+
+parameters:
+  - name: trivyVersion
+    type: string
+    default: '0.76.1'
+  - name: trivySha256
+    type: string
+    default: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - bash: |
+      set -euo pipefail
+      DIR="$AGENT_TOOLSDIRECTORY/trivy/$TRIVY_VERSION"
+
+      not_installed() {
+        echo "##vso[task.logissue type=warning]Trivy $TRIVY_VERSION is NOT installed: $1"
+        exit 0
+      }
+
+      if [ ! -x "$DIR/trivy" ] || [ ! -f "$DIR/contrib/junit.tpl" ]; then
+        TMP="$(mktemp -d)"
+        trap 'rm -rf "$TMP"' EXIT
+        TARBALL="$TMP/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        curl -fsSL -o "$TARBALL" \
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+          || not_installed "the release could not be downloaded."
+        echo "$TRIVY_SHA256  $TARBALL" | sha256sum -c --status - \
+          || not_installed "the download failed its SHA-256 check."
+        mkdir -p "$TMP/unpack" "$DIR/contrib"
+        tar -xzf "$TARBALL" -C "$TMP/unpack" trivy contrib/junit.tpl \
+          || not_installed "the release archive could not be unpacked."
+        mv "$TMP/unpack/contrib/junit.tpl" "$DIR/contrib/junit.tpl"
+        mv "$TMP/unpack/trivy" "$DIR/trivy"
+      fi
+
+      echo "Trivy $TRIVY_VERSION ready in $DIR"
+      echo "##vso[task.setvariable variable=trivyDir]$DIR"
+    displayName: Install Trivy ${{ parameters.trivyVersion }}
+    condition: ${{ parameters.condition }}
+    env:
+      TRIVY_VERSION: ${{ parameters.trivyVersion }}
+      TRIVY_SHA256: ${{ parameters.trivySha256 }}

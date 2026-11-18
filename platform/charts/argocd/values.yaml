@@ -1,0 +1,276 @@
+# =============================================================================
+# argocd -- BASE values
+# =============================================================================
+# The SELF-MANAGEMENT HANDOFF.
+#
+# OpenTofu bootstraps Argo CD so there is something to run the first sync at all --
+# a ClusterIP controller with server.insecure and no ingress, reachable only by
+# port-forward with the local admin account. That install owns no route and no SSO,
+# which means `<host>/argocd` has no owner and nobody can log in with a real
+# identity. This chart closes that: from its sync onward Argo CD manages its own
+# route and its own OIDC config.
+#
+# THREE THINGS THAT MUST BE TRUE OR THIS BRICKS THE CLUSTER
+#
+#   1. The Application never prunes (island: `prune: false` in the descriptor) or
+#      never auto-syncs (hub: `selfManaged: true`). Pruning your own controller
+#      mid-sync deletes a resource needed to finish the deletion, and nothing is
+#      left running to recover.
+#
+#   2. The Helm RELEASE NAME must equal the tofu helm_release name, and
+#      argo-cd.fullnameOverride below must match it too. Helm adopts by release
+#      name; the rendered resource names must also line up, or Argo creates a
+#      SECOND, parallel Argo CD in the same namespace while the first keeps running.
+#
+#   3. After this goes green, the tofu helm_release is frozen --
+#      lifecycle { ignore_changes = all } -- and never applied again.
+#
+# Cluster facts (hostname, issuer, client id, RBAC groups) live in the gitops repo:
+# platform/values/<cluster>/argocd.yaml.
+
+# ---------------------------------------------------------------------------
+# Traefik Gateway API HTTPRoute (this wrapper's own resource)
+# ---------------------------------------------------------------------------
+gateway:
+  # The Gateway object created by the traefik chart. Its name comes from that
+  # chart's gateway.name value, NOT from its release name.
+  name: traefik-gateway
+  namespace: traefik
+  # The HTTPS listener ONLY. A route with no sectionName also binds to plaintext
+  # `web`, where it competes with the redirect route.
+  sectionName: websecure
+
+route:
+  # Per cluster; the template requires it.
+  hostname: ""
+  # Must stay equal to argo-cd.configs.params."server.rootpath" below. If they
+  # diverge, the UI loads and every asset and API call 404s, because Argo CD writes
+  # self-links under a prefix the route does not serve.
+  pathPrefix: /argocd
+  # Traefik Middlewares (ExtensionRef) applied to this route. They must exist in
+  # THIS namespace -- the traefik chart renders auth-ratelimit into it. The login
+  # endpoint is the credential-stuffing target; HSTS comes from the entrypoint.
+  middlewares:
+    - auth-ratelimit
+
+# =============================================================================
+# Upstream argo-cd chart
+# =============================================================================
+argo-cd:
+  # LOAD-BEARING FOR ADOPTION -- see note 2 in the header. Makes every component
+  # render as argocd-* (server, repo-server, redis, ...), matching what the tofu
+  # install created. Without it the subchart names itself <release>-argo-cd-*.
+  fullnameOverride: argocd
+
+  global:
+    # Per cluster (the public host). Read by the subchart for self-links.
+    domain: ""
+    # Production floor. Every component reads
+    # `<component>.priorityClassName | default global.priorityClassName`, so this
+    # one key covers controller, server, repo-server, applicationset, redis and the
+    # redis-secret-init hook. It was missing: the GitOps controller ran at
+    # priority 0, level with application pods.
+    priorityClassName: system-cluster-critical
+
+  configs:
+    cm:
+      # Serve plain HTTP: TLS terminates at the Gateway. Matches the tofu install.
+      "server.insecure": "true"
+      # `url` and `oidc.config` are per cluster (gitops values): url must match the
+      # Keycloak client's Valid Redirect URIs exactly, including the /argocd prefix,
+      # and the issuer must match the realm's discovery document byte for byte.
+      #
+      # clientSecret in oidc.config is a REFERENCE ($-prefixed) into argocd-secret,
+      # resolved at runtime. The literal never appears in any values file.
+
+    rbac:
+      # Authenticated users are read-only unless mapped to a role.
+      "policy.default": role:readonly
+      # The logs line is not redundant: Argo CD 3.x ALWAYS enforces logs RBAC (the
+      # old server.rbac.log.enforce.enable=false no longer disables it), so
+      # readonly users lose pod-log visibility without an explicit grant. Losing
+      # logs is what makes people ask for admin. The admin group mapping is per
+      # cluster.
+      "policy.csv": |
+        p, role:readonly, logs, get, */*, allow
+
+    params:
+      "server.insecure": "true"
+      # Serve under the /argocd prefix. Must equal route.pathPrefix above.
+      "server.rootpath": "/argocd"
+
+    # ---- argocd-secret: NOT MANAGED BY THIS CHART ----
+    # argocd-secret already exists: the tofu bootstrap created it, and it holds the
+    # server's signature key and the local admin password hash. The OIDC client
+    # secret is patched into that same object by hand from the gitops setup/ folder,
+    # because the Secrets Store CSI driver cannot deliver it -- the driver only
+    # syncs while a pod mounts the SPC volume, and argocd-server mounts nothing.
+    #
+    # If this chart managed the Secret, every sync would rewrite it from values:
+    # the hand-patched client secret would be replaced by a placeholder (breaking
+    # SSO) and the signature key regenerated (invalidating every session). The
+    # forked chart carried exactly that footgun as a `configs.secret.extra`
+    # placeholder plus an install-time injection script. Removed, not left empty.
+    secret:
+      createSecret: false
+
+  server:
+    # 2 replicas: the server is stateless, and a node drain must not take the
+    # control plane for every other component with it.
+    replicas: 2
+    service:
+      type: ClusterIP
+    # Routing is the HTTPRoute above. The built-in Ingress would be a second,
+    # conflicting owner of the same traffic path.
+    ingress:
+      enabled: false
+    pdb:
+      enabled: true
+      maxUnavailable: 1
+    # THE TOPOLOGY SELECTOR GOTCHA. The selector must match the label the pods
+    # actually carry, which is <nameOverride>-<component> -- and the upstream chart
+    # defaults nameOverride to `argocd`. It is NOT derived from fullnameOverride, so
+    # `<fullname>-server` here would match zero pods: skew stays 0, DoNotSchedule
+    # is vacuously satisfied, and both replicas can land on one node while the
+    # constraint looks enforced. Verify after any chart bump with:
+    #   helm template ... | grep -A2 'app.kubernetes.io/name'
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: argocd-server
+    nodeSelector:
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # Deliberately 1 replica. The controller shards by cluster; on a single-cluster
+  # island a second replica processes nothing -- it is not a warm standby. Scaling
+  # here means sharding, which is a different configuration.
+  controller:
+    replicas: 1
+    nodeSelector:
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+
+    # Until this was on, Argo CD was invisible to Prometheus: the metrics port
+    # (8082) was always open, but with no Service and no ServiceMonitor nothing
+    # scraped it, so a GitOps failure notified nobody. The application controller
+    # alone carries every argocd_app_* and argocd_cluster_* series; the alerts that
+    # consume them live in observability/rules/argocd.yaml. The job label there is
+    # DERIVED from this Service: <fullnameOverride>-application-controller-metrics.
+    #
+    # COLD-REBUILD ORDERING: the subchart gates the ServiceMonitor on
+    # .Capabilities.APIVersions.Has monitoring.coreos.com, and observability syncs
+    # after argocd, so on a from-scratch cluster it renders on the next refresh.
+    #
+    # NOT enabled: metrics.rules (the subchart's own PrometheusRule). Alert
+    # definitions belong in one place, with promtool coverage.
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+        interval: 30s
+
+  # The component that renders every chart. It needs memory to `helm template` the
+  # larger charts (observability renders a very large manifest).
+  repoServer:
+    replicas: 2
+    pdb:
+      enabled: true
+      maxUnavailable: 1
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            # The pod label (<nameOverride>-<component>), not the fullname -- see
+            # the note on server.topologySpreadConstraints.
+            app.kubernetes.io/name: argocd-repo-server
+    nodeSelector:
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  # Required: the platform appsets ARE ApplicationSets.
+  applicationSet:
+    enabled: true
+    replicas: 1
+    nodeSelector:
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # Off: no configured receiver. Alerting goes through Alertmanager (the argocd
+  # rules), and a notifications controller with nothing to notify is a component
+  # to patch and monitor for no benefit.
+  notifications:
+    enabled: false
+
+  # The manifest cache. Single instance is correct: losing it costs a re-render,
+  # and redis-ha is three more pods plus a sentinel to operate.
+  redis:
+    enabled: true
+    nodeSelector:
+      pool: infra
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: infra
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # Off: Keycloak is the identity provider and Argo CD talks to it directly
+  # through oidc.config. Dex would be a second, unused OIDC hop.
+  dex:
+    enabled: false

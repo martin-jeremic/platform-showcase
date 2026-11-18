@@ -1,0 +1,10 @@
+Elasticsearch {{ .Chart.AppVersion }} deployed (single node, authentication {{ if .Values.security.enabled }}ON{{ else }}OFF{{ end }}).
+
+Cluster-internal only -- this chart renders no HTTPRoute:
+  http://{{ include "elasticsearch.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.httpPort }}
+
+Check health without putting the password on your command line history:
+  kubectl -n {{ .Release.Namespace }} exec {{ include "elasticsearch.fullname" . }}-0 -c elasticsearch -- \
+    sh -c 'curl -s -u "elastic:$ELASTIC_PASSWORD" http://127.0.0.1:{{ .Values.service.httpPort }}/_cluster/health'
+
+Data: PVC {{ include "elasticsearch.fullname" . }} on StorageClass {{ .Values.persistence.storageClass }} (Retain).

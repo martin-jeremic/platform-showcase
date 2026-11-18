@@ -1,0 +1,136 @@
+# =============================================================================
+# reloader -- BASE values
+# =============================================================================
+# Sync wave 3. Installs the upstream Stakater Reloader controller, which watches
+# ConfigMaps/Secrets and rolls the workloads that consume them, so a config or
+# secret change -- including a Key Vault rotation landing in a CSI-synced Secret --
+# actually reaches running pods.
+#
+# WHY THE REAL POSTURE IS IN THE BASE FILE AND NOT AN OVERLAY.
+# The forked chart put the working configuration in values-demo.yaml and left the
+# base file inert -- autoReloadAll: false, enableHA: false, 1 replica, no PDB, no
+# podMonitor, no placement. The demo cluster was then installed with base values
+# ONLY, so the controller ran with autoReloadAll: false and no workload carried a
+# reloader.stakater.com/* annotation: nothing was ever restarted on a ConfigMap or
+# Secret change. Installed, healthy, and doing nothing for months, while the
+# release reported fine the whole time. An overlay that forgets a key can no
+# longer silently disable the component.
+#
+# Opting a workload OUT (autoReloadAll is on, so opt-out is the interesting case):
+#   reloader.stakater.com/auto: "false"   on the Deployment/StatefulSet/DaemonSet
+# (the observability chart does exactly that for Prometheus and Alertmanager).
+# =============================================================================
+
+nameOverride: ""
+fullnameOverride: "reloader"
+commonLabels: {}
+
+# NOTE the doubled key: `reloader.reloader.*` is the controller's own config block
+# within the subchart; `reloader.image.*` etc. are siblings of it.
+# `reloader.enabled` is read only by this chart's Chart.yaml condition.
+reloader:
+  enabled: true
+
+  # No image.tag here. The subchart pins its own image to its appVersion (a fixed
+  # tag, never `latest`), so the Chart.yaml dependency version is the ONE place the
+  # Reloader version is set. A literal here only repeated it, and a subchart bump
+  # that forgot to edit it would have kept running the old image.
+
+  reloader:
+    # Global watch across all namespaces -- the point of a platform-wide reloader.
+    watchGlobally: true
+
+    # Fleet-wide auto-reload: every workload referencing a changed ConfigMap or
+    # Secret is rolled WITHOUT a per-workload annotation.
+    autoReloadAll: true
+
+    # Jobs are not rolled. With autoReloadAll a Job referencing a changed Secret is
+    # DELETED AND RECREATED -- the Trivy operator's scan Jobs mount a per-scan pull
+    # Secret, so every private-image scan was recreated mid-run and hung. Set this
+    # BEFORE installing trivy on a cluster that runs this chart.
+    ignoreJobs: true
+
+    # "annotations" stamps a pod-template annotation instead of mutating a dummy
+    # env var. Required under GitOps: the env-var strategy fights Argo CD's diff
+    # forever. The appsets carry a matching ignoreDifferences entry for
+    # /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+    # -- the two MUST stay in sync, or selfHeal reverts the annotation, triggering a
+    # second redundant restart and permanent OutOfSync.
+    reloadStrategy: annotations
+
+    # Also roll when a watched CM/Secret is first CREATED (a CSI-synced Secret
+    # appears only after the first pod mounted the volume).
+    reloadOnCreate: true
+    # Deleting a source is usually intentional teardown, not a restart signal.
+    reloadOnDelete: false
+
+    logFormat: json
+    logLevel: info
+
+    # Leader-elected HA: the second replica is a warm standby, so a node drain or
+    # cluster upgrade never leaves the platform without a reloader watching.
+    enableHA: true
+
+    rbac:
+      enabled: true
+    serviceAccount:
+      create: true
+
+    deployment:
+      replicas: 2
+      revisionHistoryLimit: 2
+
+      # `pool`, not `agentpool`: the AKS auto-label resolves too, but `pool` is the
+      # label the IaC actually sets and therefore the authoritative one.
+      nodeSelector:
+        pool: infra
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: infra
+          effect: NoSchedule
+
+      # HARD spread. "ScheduleAnyway so a 1-node infra pool must still schedule" is
+      # exactly how two gateway replicas, and six cert-manager pods, ended up on one
+      # node each. A replica left Pending is a visible, fixable problem; two
+      # replicas colocated is invisible false HA.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: reloader
+
+      containerSecurityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+      # Production floor. Platform services run at system-cluster-critical; per-node
+      # DaemonSets run one tier higher at system-node-critical, so on a full node a
+      # node agent preempts a platform pod that can reschedule elsewhere.
+      priorityClassName: system-cluster-critical
+
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+
+    # A PodMonitor is a monitoring.coreos.com CRD, and those CRDs arrive with the
+    # observability chart -- three waves AFTER this one. Enabling it in the base
+    # makes this Application fail on a fresh cluster with "no matches for kind
+    # PodMonitor". Cluster values switch it on once observability exists.
+    podMonitor:
+      enabled: false
+    serviceMonitor:
+      enabled: false

@@ -1,0 +1,39 @@
+{{- /*
+One CronJob per enabled dataset, each running a full `load <dataset>` on its own schedule. Only
+name, schedule and suspend differ; the Job spec is the shared refdata.jobSpec helper.
+
+This chart iterates (`range`) on purpose and is the one exception to the explicit-keys rule (the PR
+helm stage runs with forbidRange: false for it). `datasets` is not configuration of one workload:
+each entry IS a workload, and the list grows when a feed is added. The `if $ds.enabled` below is
+the intended switch, not the blanket `if $v` that once dropped every false config flag.
+*/ -}}
+{{- $root := . -}}
+{{- $cd := .Values.cronDefaults -}}
+{{- range $name, $ds := .Values.datasets }}
+{{- if $ds.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-%s" (include "refdata.fullname" $root) (include "refdata.dnsName" $name) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "refdata.labels" $root | nindent 4 }}
+    example.com/dataset: {{ $name | quote }}
+spec:
+  schedule: {{ required (printf "datasets.%s.schedule is required" $name) $ds.schedule | quote }}
+  timeZone: Etc/UTC
+  suspend: {{ $ds.suspend | default false }}
+  concurrencyPolicy: {{ $cd.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $cd.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $cd.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $cd.failedJobsHistoryLimit }}
+  {{- /* NOT here: ttlSecondsAfterFinished. See refdata.jobSpec. */}}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "refdata.selectorLabels" $root | nindent 8 }}
+        example.com/dataset: {{ $name | quote }}
+    spec:
+      {{- include "refdata.jobSpec" (dict "root" $root "args" (list "load" $name)) | nindent 6 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,87 @@
+# Stage env config for product-a-web (Angular SPA served by nginx), cluster product-a-stage (on-prem MicroK8s spoke of the hub).
+# A browser app holds no secrets, so there is no Key Vault and no workload identity here.
+# The image digest comes from stage/image.yaml (listed after this file in the Application).
+#
+# Every key the chart reads per environment is STATED here, never inherited from a chart default
+# (scripts/check-configmaps.py enforces it).
+
+# MicroK8s has no kubelet identity: images are pulled with the namespace pull secret the platform
+# layer creates.
+imagePullSecrets:
+  - name: productacr-pull
+
+image:
+  pullPolicy: IfNotPresent
+
+# ── Routing (Gateway API) ────────────────────────────────────────────────────────────────────
+# sectionName pins the route to the TLS listener. Without it the route also binds the plain-HTTP
+# listener and the service answers on :80. Listener hostnames match EXACTLY: a route on any other
+# host cannot attach, and Argo still shows Synced/Healthy while it reports NoMatchingParent.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+
+route:
+  enabled: true
+  hostnames:
+    - stage.product-a.example.net
+  path: /
+  rewrite:
+    enabled: false
+    replacePrefixMatch: /
+
+# ── Scaling, health, placement (owned per env) ───────────────────────────────────────────────
+replicaCount: 1
+
+# While enabled is false the Deployment uses replicaCount. Turning it on makes replicaCount inert:
+# the HPA owns the replica count from then on.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 1
+  targetCPUUtilizationPercentage: 75
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# startupProbe: failureThreshold x periodSeconds is the boot budget before the kubelet kills the
+# pod. readinessProbe gates Service endpoints. livenessProbe RESTARTS the container, so it stays
+# off unless the service can genuinely wedge.
+startupProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 5
+  failureThreshold: 30
+readinessProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 10
+  failureThreshold: 3
+livenessProbe:
+  enabled: false
+  path: /healthz
+  periodSeconds: 30
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+# One replica: nothing to spread.
+affinity: {}
+
+# ── Runtime configuration ───────────────────────────────────────────────────────────────────
+# The image is environment-agnostic: the container entrypoint writes these values to
+# /usr/share/nginx/html/env.js at start, and index.html loads it before the bundle. One image
+# runs in every environment; rebuilding per environment would break "promote by digest".
+config:
+  environment: "Stage"
+  apiBaseUrl: "https://stage.product-a.example.net/api"
+  oidcAuthority: "https://dev.example.com/keycloak/realms/product-a-stage"
+  oidcClientId: "product-a-web"
+  oidcScope: "openid profile email"

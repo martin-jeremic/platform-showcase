@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'traefik' to 'aks-product-a-demo'.
+chartPath:     traefik
+chartRevision: traefik-1.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   traefik-gateway
+namespace:     traefik
+syncWave:      "2"

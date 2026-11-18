@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "headlamp.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "headlamp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "headlamp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "headlamp.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "headlamp.serviceAccountName" . }}
+      # Headlamp needs no API access of its own: every call carries the user's token.
+      automountServiceAccountToken: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: headlamp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "-in-cluster"
+            - "-base-url={{ .Values.baseUrl }}"
+          {{- if .Values.oidc.enabled }}
+          # Configuration through HEADLAMP_CONFIG_* environment variables, not argv:
+          # an expanded argument is visible in the node's process list; an env var
+          # from a secretKeyRef is not.
+          env:
+            - name: HEADLAMP_CONFIG_OIDC_IDP_ISSUER_URL
+              value: {{ required "oidc.issuerUrl is required when oidc.enabled" .Values.oidc.issuerUrl | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_SCOPES
+              value: {{ .Values.oidc.scopes | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "oidc.existingSecret is required: the chart renders no client-secret Secret" .Values.oidc.existingSecret }}
+                  key: client-id
+            - name: HEADLAMP_CONFIG_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: client-secret
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 4466
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: headlamp-config
+              mountPath: /home/headlamp/.config
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: headlamp-config
+          emptyDir: {}

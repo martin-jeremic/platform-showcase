@@ -1,0 +1,24 @@
+# Lint/template values: the shape of gitops/services apps/hr-portal/dev/{values,image}.yaml.
+# The digest is sha256("ci"), not a real image.
+nameOverride: hr-portal
+fullnameOverride: hr-portal
+image:
+  tag: "0.1.0"
+  digest: sha256:1b158839f8aa339e89bb50b1603e90ec68e0fd5565fe10a7cb32729fddf7070a
+env:
+  IDENTITY_URL: https://dev.example.com/keycloak/realms/org-test
+  IDENTITY_CLIENT: hr-portal
+  IDENTITY_REDIRECT_URI: https://dev.example.com/hr-portal/
+  API_URL: https://dev.example.com/hr-api
+apps:
+  portal: /hr-portal
+  admin: /hr-admin
+  absence: /hr-absence
+  employeeBook: /hr-employee-book
+configMap:
+  create: true
+  name: hr-portal-config
+route:
+  hostnames:
+    - dev.example.com
+  path: /hr-portal

@@ -1,0 +1,113 @@
+# Trivy Operator (chart trivy): new fixable Critical CVEs, secrets baked
+# into images, and the scanner itself going silent.
+#
+# Scrape prerequisite: the operator's metrics as job `trivy`. On an agent
+# spoke that is cluster-monitoring-agent metrics.trivy; on a cluster with
+# its own Prometheus it is the chart's ServiceMonitor, whose job is the Service
+# name, trivy. trivy_vulnerability_id needs the chart's
+# operator.metricsVulnIdEnabled (on in its base values).
+#
+# Where it runs (gate prometheusRules.files.trivy): the hub evaluates it for
+# itself and the agent spoke (product-a-stage); aks-org-prod and
+# aks-product-a-demo each evaluate it on their own Prometheus.
+#
+# Who gets it: every rule carries `category: security`. The base route tree
+# (values.yaml, notifications.config.route) sends that to Teams AND mail once a
+# day, with no "resolved" message -- unlike other warnings, which are mail only.
+# A "new" CVE that stops being new is not fixed, so a resolved post would lie.
+#
+# What is deliberately NOT an alert: the backlog. When this was written
+# product-a-stage alone had 19 images with a fixable Critical CVE, 18
+# of them third-party (calico, coredns, metallb, Elasticsearch, ...). One alert
+# per standing finding is the same Teams flood every day, and gets muted. The
+# Security -> Trivy dashboard lists the backlog; these rules report what CHANGED.
+#
+# Rescans: a report is deleted and rebuilt every 24h (scannerReportTTL), so a
+# finding's series has a gap of a few minutes once a day. keep_firing_for rides
+# over it, so a gap neither ends an alert nor starts a second one.
+#
+# CLUSTER-AWARE: see rules/workload.yaml.
+groups:
+  - name: platform.trivy
+    # The data changes once per scan, and the new-finding rule reads 7 days of
+    # samples: every 5m is plenty, and 10x cheaper than the global 30s.
+    interval: 5m
+    rules:
+      # A Critical CVE with a published fix that this image (cluster, namespace,
+      # registry, repository, tag) did not have at any point between 7d6h and 6h
+      # ago: the image version was just deployed, or the CVE was just published.
+      # It fires once (repeat_interval 24h > the ~6h it stays "new"). Grouped per
+      # namespace, so a new image with five such CVEs is one message.
+      #
+      # The last clause: THIS Prometheus has had the cluster's trivy target
+      # for more than 2 days. Until then the look-back window cannot hold the
+      # backlog, and every finding would look new: on a fresh install (the first
+      # scans take hours), and after this Prometheus lost its data. It reads `up`,
+      # not a findings metric, so a cluster with no Critical CVE a week ago still
+      # alerts on its first one. One series per cluster: cheap.
+      - alert: PlatformTrivyNewFixableCriticalCVE
+        expr: |
+          count by (cluster, namespace, image_registry, image_repository, image_tag, vuln_id, fixed_version) (
+            trivy_vulnerability_id{job="trivy", severity="Critical", fixed_version!=""}
+          )
+          unless on (cluster, namespace, image_registry, image_repository, image_tag, vuln_id)
+          count by (cluster, namespace, image_registry, image_repository, image_tag, vuln_id) (
+            max_over_time(trivy_vulnerability_id{job="trivy", severity="Critical", fixed_version!=""}[7d] offset 6h)
+          )
+          and on (cluster)
+          count by (cluster) (max_over_time(up{job="trivy"}[7d] offset 2d))
+        for: 30m
+        keep_firing_for: 1h
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "New fixable Critical {{ $labels.vuln_id }} in {{ $labels.image_repository }} on {{ $labels.cluster }}"
+          description: >-
+            {{ $labels.image_registry }}/{{ $labels.image_repository }}{{ if $labels.image_tag }}:{{ $labels.image_tag }}{{ end }}
+            in namespace {{ $labels.namespace }} has Critical {{ $labels.vuln_id }}, fixed in
+            {{ $labels.fixed_version }}. The image did not have it in the past 7 days: this version
+            was just deployed, or the CVE was just published. Rebuild on a patched base image or
+            bump the dependency. All findings: Grafana, Security -> Trivy, CVE list.
+
+      # A Critical or High secret (key, token, password) inside a running image.
+      # Standing, not new-only: a leaked credential stays a problem every day
+      # until it is rotated and the image rebuilt.
+      - alert: PlatformTrivyExposedSecret
+        expr: |
+          sum by (cluster, namespace, image_registry, image_repository, image_tag) (
+            trivy_image_exposedsecrets{job="trivy", severity=~"Critical|High"}
+          ) > 0
+        for: 30m
+        keep_firing_for: 2h
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Secret baked into {{ $labels.image_repository }} on {{ $labels.cluster }}"
+          description: >-
+            {{ $labels.image_registry }}/{{ $labels.image_repository }}{{ if $labels.image_tag }}:{{ $labels.image_tag }}{{ end }}
+            in namespace {{ $labels.namespace }} contains {{ $value }} Critical/High secret(s) in its
+            files. Treat each as leaked: rotate it, then rebuild the image without it. Which file
+            and rule: kubectl -n {{ $labels.namespace }} get exposedsecretreports -o yaml.
+
+      # The scanner went silent: a cluster that had a trivy target in the
+      # last 7 days has no healthy scrape now (the rules/rabbitmq.yaml shape). Without
+      # this, a dead operator looks exactly like a clean cluster. A cluster that
+      # never ran it never fires; one where it is removed on purpose stops after 7d.
+      - alert: PlatformTrivyNotReporting
+        expr: |
+          max by (cluster) (max_over_time(up{job="trivy"}[7d]))
+          unless
+          max by (cluster) (up{job="trivy"} == 1)
+        for: 30m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Trivy is not reporting on {{ $labels.cluster }}"
+          description: >-
+            No healthy scrape of job trivy on {{ $labels.cluster }} for 30m: the operator
+            is down or unreachable, so no new scan results arrive and the Security dashboard shows
+            stale numbers. Find the operator (its namespace differs per cluster) with
+            kubectl get pods -A -l app.kubernetes.io/instance=trivy, then read its log.

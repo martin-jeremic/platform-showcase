@@ -1,0 +1,9 @@
+domain: app.product-a.example.net
+oidc:
+  keycloak:
+    baseUrl: https://app.product-a.example.net/keycloak
+    # Single-tenant cluster: the platform clients live in the product realm itself
+    # (no broker realm), with `groups` as a default client scope.
+    realm: product-a
+  grafana:
+    rootUrl: https://app.product-a.example.net/monitoring/grafana

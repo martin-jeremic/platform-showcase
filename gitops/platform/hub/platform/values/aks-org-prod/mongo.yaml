@@ -1,0 +1,13 @@
+# Backup ON: weekdays 17:00, inside the cluster's power window.
+azureKeyVault:
+  workloadIdentityClientId: "cccccccc-cccc-cccc-cccc-cccccccccccc"
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  keyvaultName: kv-org-prod
+backup:
+  enabled: true
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "dddddddd-dddd-dddd-dddd-dddddddddddd"
+  azure:
+    accountName: stbackuporg
+    containerName: mongo-backups

@@ -1,0 +1,82 @@
+# STANDALONE stack: this cluster does not ship telemetry to the hub. Filesystem
+# Loki on the Retain class. Product services run here, so the log contract is parsed.
+kubePromStack:
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  prometheus:
+    prometheusSpec:
+      externalLabels:
+        cluster: aks-product-a-demo
+  alertmanager:
+    serviceAccount:
+      annotations:
+        azure.workload.identity/client-id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    alertmanagerSpec:
+      podMetadata:
+        labels:
+          azure.workload.identity/use: "true"
+      volumes:
+        - name: alertmanager-kv
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: alertmanager-kv
+      volumeMounts:
+        - name: alertmanager-kv
+          mountPath: /etc/alertmanager/kv
+          readOnly: true
+  grafana:
+    persistence:
+      storageClassName: platform-retain
+      size: 2Gi
+    grafana.ini:
+      server:
+        domain: demo.product-a.example.net
+        root_url: https://demo.product-a.example.net/monitoring/grafana
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        access: proxy
+        jsonData:
+          httpHeaderName1: X-Scope-OrgID
+        secureJsonData:
+          httpHeaderValue1: aks-product-a-demo
+loki:
+  singleBinary:
+    persistence:
+      storageClass: platform-retain
+      size: 20Gi
+alloyPipeline:
+  cluster: aks-product-a-demo
+  tenant: aks-product-a-demo
+  parseLogContract: true
+dashboards:
+  folders:
+    Platform: true
+    Product: true
+prometheusRules:
+  files:
+    certificates: true
+    edge: true
+    rabbitmq: true
+    keycloak: true
+notifications:
+  enabled: true
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  graph:
+    clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    sender: alerts@example.com
+    recipients:
+      - platform-team@example.com
+  keyVault:
+    keyvaultName: kv-product-a-demo
+    authMode: workloadIdentity

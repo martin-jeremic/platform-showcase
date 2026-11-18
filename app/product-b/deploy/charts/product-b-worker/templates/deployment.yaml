@@ -1,0 +1,67 @@
+{{- /*
+ONE replica and Recreate, and replicas is deliberately NOT a value.
+
+The outbox and scheduled-command drains claim no rows (no FOR UPDATE SKIP LOCKED), so two worker
+pods would read the same rows and could dispatch a message twice. A RollingUpdate's surge pod is
+exactly such a second pod, for the length of every rollout. So: no replicas knob, no autoscaler,
+and Recreate stops the old pod before the new one starts. Scaling out needs the drains to claim
+rows first; that is a code change, not a values change, and the chart says so by not offering one.
+
+The worker exits 0 on SIGTERM after finishing the current batch (verified on the image), well
+inside the 30 s grace period.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pb.fullname" . }}
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+  annotations:
+    secret.reloader.stakater.com/reload: {{ .Values.secretName | quote }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "pb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pb.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- include "pb.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "pb.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "pb.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: probes
+              containerPort: 8080
+          env:
+            - name: DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: Database
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: probes
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: probes
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

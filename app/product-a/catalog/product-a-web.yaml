@@ -1,0 +1,23 @@
+# Listed by ../catalog-info.yaml.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: product-a-web
+  title: Operator portal (SPA)
+  description: Angular single-page app served by nginx under /admin; talks to product-a-api.
+  tags: [angular, nginx]
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: product-a/product-a
+    dev.azure.com/build-definition: product-a-web-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/product-a/_git/product-a?path=/src/web
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-a-web
+    argocd/app-selector: example.com/service=product-a-web
+spec:
+  type: website
+  lifecycle: production
+  owner: product-a-team
+  system: product-a
+  dependsOn:
+    - component:product-a-api
+    - resource:product-a-identity

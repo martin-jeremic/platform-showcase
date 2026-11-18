@@ -1,0 +1,94 @@
+{{- if .Values.pki.create }}
+# Self-signed CA → CA Issuer → gateway server cert + per-spoke client certs.
+# The CA's ca.crt is the trust anchor handed to every spoke.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: observability-ingest-selfsign
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: observability-ingest-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ .Values.pki.caCommonName | quote }}
+  secretName: {{ .Values.mtls.caSecret }}     # holds tls.crt (CA), tls.key, ca.crt
+  duration: {{ .Values.pki.caDuration }}
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: observability-ingest-selfsign
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: observability-ingest-ca-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ .Values.mtls.caSecret }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: observability-ingest-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.mtls.serverCertSecret }}
+  duration: {{ .Values.pki.server.duration }}
+  renewBefore: 720h
+  {{- with .Values.pki.server.dnsNames }}
+  dnsNames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.pki.server.ipAddresses }}
+  ipAddresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  usages:
+    - server auth
+  issuerRef:
+    name: observability-ingest-ca-issuer
+    kind: Issuer
+{{- /* duration defaults to 1y. A spoke that mounts a COPY of the bundle (Key Vault)
+     cannot follow a renewal: give it the CA's lifetime (values.yaml, spokeClients). */}}
+{{- range .Values.spokeClients }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: spoke-{{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" $ | nindent 4 }}
+spec:
+  secretName: spoke-{{ .name }}-tls
+  duration: {{ .duration | default "8760h" }}
+  renewBefore: 720h
+  commonName: {{ .name | quote }}
+  subject:
+    organizations:
+      - platform-monitoring-spokes
+  usages:
+    - client auth
+  issuerRef:
+    name: observability-ingest-ca-issuer
+    kind: Issuer
+{{- end }}
+{{- end }}

@@ -1,0 +1,8 @@
+route:
+  hostname: services.example.com
+minio:
+  environment:
+    MINIO_SERVER_URL: "https://services.example.com/minio"
+    MINIO_BROWSER_REDIRECT_URL: "https://services.example.com/minio-console"
+  persistence:
+    storageClass: platform-retain

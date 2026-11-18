@@ -1,0 +1,28 @@
+apiVersion: v2
+name: elasticsearch
+description: >-
+  Elasticsearch, single-node, as a first-class platform component. Forked out of
+  a separate hand-installed repo so a fourth parallel delivery path onto the
+  cluster disappears. Three things changed in the fork: authentication is ON (the
+  original hardcoded xpack.security.enabled=false), the superuser password comes
+  from Azure Key Vault over CSI with workload identity, and the node-local
+  hostPath PV is gone -- data lives on a Retain StorageClass. No HTTPRoute is
+  rendered: the service is cluster-internal only.
+type: application
+
+# 1.1.0 -- Elasticsearch 9.3.3 -> 9.5.5. A direct upgrade (any 9.x to a later 9.x);
+#   no 9.4/9.5 breaking change touches this chart's settings, and the cluster holds
+#   only indices created on 9.x, so nothing to reindex. ONE-WAY: once 9.5.5 has
+#   opened the data path, 9.3.3 can no longer read it, and there is no snapshot
+#   repository. The image tag is now derived from appVersion, and the two init
+#   containers stop pulling an untagged `busybox` -- pinned through initImage.
+#   The Reloader annotation moves to the StatefulSet itself (it sat on the pod
+#   template, where Reloader never reads it).
+version: 1.1.0
+appVersion: "9.5.5"
+
+keywords:
+  - elasticsearch
+  - search
+sources:
+  - https://github.com/elastic/elasticsearch

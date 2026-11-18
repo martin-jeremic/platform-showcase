@@ -1,0 +1,133 @@
+# stages/pr-python-stage.yml
+#
+# PR gate for a Python (FastAPI) service: an isolated venv, flake8, pytest with JUnit results and
+# Cobertura coverage, plus optional hadolint + Trivy filesystem scan of the service folder.
+#
+# A venv per run, in the agent's temp directory, because the self-hosted agents are shared and
+# long-lived: a `pip install` into the agent's own Python leaks packages from one service's PR
+# into the next one's test run.
+#
+# extraPackages exists for shared in-repo libraries (e.g. the shared logging package). The images
+# install them by path from the monorepo root, which is why they are NOT in requirements.txt (a
+# relative path there does not resolve inside the Docker build). Without installing them here
+# every test module fails to collect with ModuleNotFoundError.
+#
+# testEnv: the service validates its settings at import time, so the tests need SOME value for
+# required settings even though no test calls the real provider. Pass obvious dummies, never a
+# real key; the default below is the one the product-a module needs.
+
+parameters:
+  - name: stageName
+    type: string
+    default: Test
+  - name: dependsOn
+    type: object
+    default: []
+  - name: projectRoot
+    type: string
+  - name: requirementsFile
+    type: string
+    default: requirements.txt
+  # Extra pip install targets relative to the repo root, e.g. [ libs/python-shared ].
+  - name: extraPackages
+    type: object
+    default: []
+  - name: testPath
+    type: string
+    default: tests
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+  - name: flake8Args
+    type: string
+    default: '--max-line-length=120'
+  - name: testEnv
+    type: object
+    default:
+      LLM_API_KEY: ci-dummy-not-a-real-key
+  - name: dockerfile
+    type: string
+    default: ''
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Python lint + tests
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: LintAndTest
+        displayName: flake8 + pytest
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: UsePythonVersion@0
+            displayName: Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+
+          - bash: |
+              set -euo pipefail
+              VENV="$AGENT_TEMPDIRECTORY/venv"
+              python -m venv "$VENV"
+              "$VENV/bin/python" -m pip install --quiet --upgrade pip
+              "$VENV/bin/pip" install --quiet -r "$PROJECT_ROOT/$REQUIREMENTS"
+              for pkg in $EXTRA_PACKAGES; do "$VENV/bin/pip" install --quiet "./$pkg"; done
+              "$VENV/bin/pip" install --quiet flake8 pytest pytest-cov
+            displayName: Create venv + install
+            env:
+              PROJECT_ROOT: ${{ parameters.projectRoot }}
+              REQUIREMENTS: ${{ parameters.requirementsFile }}
+              EXTRA_PACKAGES: ${{ join(' ', parameters.extraPackages) }}
+
+          - bash: |
+              set -euo pipefail
+              # shellcheck disable=SC2086  # FLAKE8_ARGS is a deliberate word list
+              "$AGENT_TEMPDIRECTORY/venv/bin/python" -m flake8 "$PROJECT_ROOT" $FLAKE8_ARGS --exclude "$PROJECT_ROOT/.venv"
+            displayName: flake8
+            env:
+              PROJECT_ROOT: ${{ parameters.projectRoot }}
+              FLAKE8_ARGS: ${{ parameters.flake8Args }}
+
+          - bash: |
+              set -euo pipefail
+              cd "$PROJECT_ROOT"
+              "$AGENT_TEMPDIRECTORY/venv/bin/python" -m pytest "$TEST_PATH" \
+                --junitxml="$AGENT_TEMPDIRECTORY/TestResults/pytest.xml" \
+                --cov=. --cov-report="xml:$AGENT_TEMPDIRECTORY/Coverage/coverage.xml" --cov-report=term-missing
+            displayName: pytest
+            env:
+              PROJECT_ROOT: ${{ parameters.projectRoot }}
+              TEST_PATH: ${{ parameters.testPath }}
+              ${{ each kv in parameters.testEnv }}:
+                ${{ kv.key }}: ${{ kv.value }}
+
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: $(Agent.TempDirectory)/TestResults/pytest.xml
+              failTaskOnFailedTests: true
+              testRunTitle: ${{ parameters.projectRoot }} pytest
+
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish coverage
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(Agent.TempDirectory)/Coverage/coverage.xml
+              failIfCoverageEmpty: true
+
+          - ${{ if ne(parameters.dockerfile, '') }}:
+            - template: ../steps/hadolint-steps.yml
+              parameters:
+                dockerfile: ${{ parameters.dockerfile }}
+            - template: ../steps/trivy-scan-steps.yml
+              parameters:
+                scanType: fs
+                scanPath: ${{ parameters.projectRoot }}
+                reportName: pr-${{ parameters.stageName }}

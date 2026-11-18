@@ -1,0 +1,6 @@
+# Dev (push-based) values. Facts not known yet are committed as <<MARKER>> placeholders; the CD
+# pipeline's refuse-placeholders stage fails the deploy, naming file, line and marker, while any
+# remains. An unfilled value therefore never reaches the cluster, where it would only surface as
+# a pod that refuses to start. Pull requests stay green while the facts are being gathered.
+config:
+  tenancy: '{"Mode":"SchemaPerTenant","DefaultTenant":"<<DEV_DEFAULT_TENANT>>"}'

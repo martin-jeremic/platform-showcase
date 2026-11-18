@@ -1,0 +1,65 @@
+# Non-secret dev overrides for the ordering-api chart, release ordering-api, cluster hub-dev (the hub itself, in-cluster).
+# Hand-maintained: the CD promotion never touches this file (it writes image.yaml and moves
+# chart.version in release.yaml only).
+
+# ── Routing: path-per-app on the single host dev.example.com (README, path allocation) ──
+# sectionName pins the route to the TLS listener; without it the route also binds the plain-HTTP
+# listener and the app answers on :80. Listener hostnames match EXACTLY: a stale per-app hostname
+# reports NoMatchingParent while Argo still shows Synced/Healthy.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: true
+  hostnames:
+    - dev.example.com
+  path: /ordering-api
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+# On-prem hub: images are pulled with the namespace pull secret.
+imagePullSecrets:
+  - name: orgacr-pull
+
+# ── Configuration (ConfigMap) ────────────────────────────────────────────────────────────────
+env:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_FORMAT: "json"
+  DB_NAME: "ordering"
+  IDENTITY_ISSUER: "https://dev.example.com/keycloak/realms/org-test"
+  IDENTITY_JWKS_URI: "https://dev.example.com/keycloak/realms/org-test/protocol/openid-connect/certs"
+  ACCESS_API_URL: "http://access-api.access.svc.cluster.local"
+  MAIL_TENANT_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  MAIL_SENDER: "ordering@example.com"
+
+# ── Secrets (Secrets Store CSI driver) ───────────────────────────────────────────────────────
+# Only real secrets, one PLAIN value per Key Vault object (no JSON blobs, no Base64), each synced
+# into the pod as one environment variable:
+#   ordering-api--mongo-connection
+#   ordering-api--mail-client-secret
+# The driver fails the WHOLE mount if one object is missing: the pod sits in ContainerCreating
+# with no useful event while Argo shows Synced. Seed first, promote second:
+#   VAULT=kv-org-dev bash bootstrap/populate-kv.sh ordering-api mongo-connection mail-client-secret
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-org-dev
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  # On-prem hub: no node identity exists, so the driver authenticates with the namespace's
+  # `secrets-store-creds` service principal (argocd/setup/secret-secrets-store-creds.yaml).
+  authMode: servicePrincipal
+
+# ── Capacity ─────────────────────────────────────────────────────────────────────────────────
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

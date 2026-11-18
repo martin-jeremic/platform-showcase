@@ -1,0 +1,108 @@
+# examples/e2e-nightly.yml - nightly end-to-end run for the product-a web app.
+#
+# Runs the FULL Playwright surface against the develop branch once a day, including the tier the
+# per-push CI cannot run: a real Keycloak authorization-code + PKCE login against the DEPLOYED
+# dev environment instead of a local dev server.
+#
+#   CI pipeline   per push. Mocked tier only (no credentials, no backend). Gates the build.
+#   this file     scheduled. Mocked tier PLUS the authenticated tier. Gates nothing; it is an
+#                 early-warning signal, not a merge gate.
+#
+# Heavy suites that were taken out of PR pipelines (architecture rules, database-backed
+# integration tests) run in the same kind of pipeline: scheduled, sequential, never blocking.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# THIS FILE ALONE DOES NOTHING. `schedules:` is inert until a pipeline DEFINITION points at it:
+#   1. Register it (scripts/ado/create-and-group-pipelines.sh, or Pipelines > New > Existing
+#      YAML). Do not run it.
+#   2. Create the variable group `product-a-e2e-credentials` (ideally Key Vault-backed) with the
+#      SECRET variables E2E_USERNAME / E2E_PASSWORD of a DEDICATED test account (never a real
+#      person's login), and authorise it for this pipeline.
+#   3. Do NOT add a schedule in the pipeline UI. A UI schedule silently OVERRIDES the `schedules:`
+#      block below, and from then on this file lies about when the pipeline runs.
+#   4. Subscribe the team to this pipeline's failures (a notification scoped to it alone).
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+# Scheduled only. Without `trigger: none` ADO applies the default "every push, every branch"
+# trigger and this would run on every commit.
+trigger: none
+pr: none
+
+schedules:
+  # Cron is UTC, always, whatever the organisation's time zone setting says.
+  - cron: '0 2 * * *'
+    displayName: Nightly E2E (develop)
+    branches:
+      include:
+        - develop
+    # always: true is the difference between a nightly and a "nightly". The default (false) SKIPS
+    # the run when develop has no new commits, so quiet days produce no data point, and a break
+    # caused by the deployed environment rather than by a commit (expired certificate, identity
+    # provider drift, bad dev data) goes unnoticed exactly on the days nobody is pushing.
+    always: true
+
+name: E2E-Nightly_$(Year:yyyy).$(Month).$(DayOfMonth)$(Rev:.r)
+
+variables:
+  # Secret variables are NOT exposed to scripts automatically; each step maps them under `env:`.
+  - group: product-a-e2e-credentials
+  - name: webRoot
+    value: src/web
+  - name: devAppUrl
+    value: https://dev.example.com/product-a/
+
+pool:
+  name: Default
+
+jobs:
+  - job: Mocked
+    displayName: Tier 1 - mocked (no credentials, no backend)
+    steps:
+      - checkout: self
+        fetchDepth: 1
+      - task: UseNode@1
+        inputs:
+          version: '22.x'
+      - bash: npm ci && npx playwright install --with-deps chromium
+        displayName: Install
+        workingDirectory: $(webRoot)
+      - bash: npx playwright test --grep-invert @authenticated --reporter=junit,line
+        displayName: Playwright (mocked)
+        workingDirectory: $(webRoot)
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: $(Agent.TempDirectory)/e2e-mocked.xml
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: $(Agent.TempDirectory)/e2e-mocked.xml
+          testRunTitle: E2E nightly - mocked
+
+  - job: Authenticated
+    displayName: Tier 2 - real login against deployed dev
+    # Runs whether the mocked tier passed or not: they answer different questions.
+    dependsOn: Mocked
+    condition: succeededOrFailed()
+    steps:
+      - checkout: self
+        fetchDepth: 1
+      - task: UseNode@1
+        inputs:
+          version: '22.x'
+      - bash: npm ci && npx playwright install --with-deps chromium
+        displayName: Install
+        workingDirectory: $(webRoot)
+      - bash: npx playwright test --grep @authenticated --reporter=junit,line
+        displayName: Playwright (authenticated)
+        workingDirectory: $(webRoot)
+        env:
+          BASE_URL: $(devAppUrl)
+          E2E_USERNAME: $(E2E_USERNAME)
+          E2E_PASSWORD: $(E2E_PASSWORD)
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: $(Agent.TempDirectory)/e2e-auth.xml
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: $(Agent.TempDirectory)/e2e-auth.xml
+          testRunTitle: E2E nightly - authenticated

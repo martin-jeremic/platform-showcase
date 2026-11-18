@@ -1,0 +1,89 @@
+{{- $fullname := include "pb.fullname" . -}}
+{{- $c := .Values.config -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-config
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  MCP_BASE_URL: {{ required "config.mcpBaseUrl is required" $c.mcpBaseUrl | quote }}
+  DEFAULT_TENANT: {{ required "config.defaultTenant is required" $c.defaultTenant | quote }}
+  LOG_LEVEL: {{ $c.logLevel | quote }}
+  KEYCLOAK_CLIENT_ID: {{ .Values.keycloakClient.clientId | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+  annotations:
+    secret.reloader.stakater.com/reload: {{ .Values.keycloakClient.secretName | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "pb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ printf "%s%s%s%s" $c.mcpBaseUrl $c.defaultTenant $c.logLevel .Values.keycloakClient.clientId | sha256sum }}
+      labels:
+        {{- /* app.kubernetes.io/name here is what product-b-mcp's NetworkPolicy admits. */}}
+        {{- include "pb.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "pb.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: agents
+          image: {{ include "pb.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "pb.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}-config
+          env:
+            # The ONLY secret this pod receives.
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloakClient.secretName }}
+                  key: KeycloakClientSecret
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+  selector:
+    {{- include "pb.selectorLabels" . | nindent 4 }}

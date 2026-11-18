@@ -1,0 +1,167 @@
+# secrets-store-csi -- BASE values
+#
+# Umbrella chart installing the Secrets Store CSI Driver + the Azure Key Vault
+# provider, tuned for SECRET ROTATION. Sync wave 0: nothing that mounts a Key Vault
+# secret can start before this is up and its CRDs are Established.
+#
+# ROTATION MODEL. The driver mounts Key Vault secrets into a pod as files and,
+# with syncSecret enabled, mirrors them into real Kubernetes Secrets;
+# enableSecretRotation re-reads Key Vault every rotationPollInterval and updates
+# both the file and the synced Secret. Env vars are read once at process start, so
+# a consumer that reads its credential from env also needs Reloader on the
+# WORKLOAD (rabbitmq, elasticsearch, keycloak and postgres-exporter all set it).
+#
+# THE CONSTRAINT THAT SHAPES EVERYTHING ELSE: a secret is only mounted, synced and
+# rotated WHILE a pod mounts its SecretProviderClass volume. Components with no pod
+# to mount it (cert-manager, and the Argo CD / Grafana OIDC client secrets)
+# therefore CANNOT be served from here -- they are seeded once by hand from the
+# gitops repo's setup/ folder, which Argo never prunes. Do not add SPCs here for
+# those; it renders an object that silently never syncs.
+#
+# AUTH. Workload identity is the default in every consuming chart: each SPC sets
+# useVMManagedIdentity: "false" and a per-workload clientID. The alternatives stay
+# as explicit options -- vmManagedIdentity (the kubelet identity; coarse, any pod
+# on the node can use it) and servicePrincipal (on-prem clusters with no OIDC
+# issuer: a per-namespace `secrets-store-creds` Secret named in the CSI volume's
+# nodePublishSecretRef).
+
+secrets-store-csi-driver:
+  enabled: true
+
+  # Keep the DaemonSet name stable (otherwise Helm prefixes the release name).
+  fullnameOverride: secrets-store-csi-driver
+
+  # --- Rotation: the whole point of this chart ---
+  enableSecretRotation: true
+  # 5m, not the upstream 2m default. A cluster installed from base values only
+  # drifted to 2m; stating it here makes the intended value the default rather
+  # than something an overlay has to remember to set.
+  rotationPollInterval: 5m
+  # Only watch/sync Secrets the driver owns -- much lower API-server load at scale.
+  # A servicePrincipal cluster's secrets-store-creds Secret therefore needs the
+  # label secrets-store.csi.k8s.io/used=true, or rotation silently stops reading it
+  # (the setup/ template in the gitops repo carries it).
+  filteredWatchSecret: true
+  syncSecret:
+    enabled: true
+
+  # Azure Workload Identity: the projected ServiceAccount token audience the Azure
+  # provider trades for a Key Vault access token. No static client secret.
+  #
+  # On the first AKS cluster this audience was INERT -- workload identity was off
+  # and every SPC fell back to useVMManagedIdentity: true against the kubelet
+  # identity, which the IaC had granted Key Vault Secrets User on the WHOLE vault.
+  # Any pod that could create an SPC could read every secret. Here it is
+  # load-bearing, and there is no vault-wide fallback.
+  tokenRequests:
+    - audience: api://AzureADTokenExchange
+
+  linux:
+    enabled: true
+    # CRDs are installed AND upgraded by the driver subchart itself (crds/ for the
+    # initial install plus an upgrade-hook Job), and kept on uninstall.
+    crds:
+      enabled: true
+
+    # DaemonSet -- must land on EVERY pool (system, infra, worker, monitoring), all
+    # of which except worker carry a workload=<pool>:NoSchedule taint. Restated
+    # explicitly because narrowing it would silently leave a pool without a CSI
+    # node plugin, and pods there would hang mounting secrets forever.
+    tolerations:
+      - operator: "Exists"
+
+    # system-NODE-critical, not system-cluster-critical (1.0.1). The platform runs
+    # two tiers: per-node agents (DaemonSets) above platform services. A DaemonSet
+    # pod is bound to one node; a platform pod can reschedule onto another. When a
+    # node is full, only the higher tier gets to preempt -- at equal priority the
+    # scheduler finds no victim and the node plugin stays Pending, which is exactly
+    # how a log-collector pod sat Pending on a full infra node.
+    priorityClassName: system-node-critical
+    driver:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 100Mi
+        limits:
+          cpu: 200m
+          memory: 200Mi
+    registrar:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 20Mi
+        limits:
+          cpu: 100m
+          memory: 100Mi
+    livenessProbe:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 20Mi
+        limits:
+          cpu: 100m
+          memory: 100Mi
+
+  windows:
+    enabled: false
+
+  logVerbosity: 0
+  logFormatJSON: true
+
+csi-secrets-store-provider-azure:
+  enabled: true
+
+  # The driver is installed above. Disable the copy bundled inside this provider
+  # chart so the DaemonSet is not installed twice -- a second per-node driver on
+  # the same socket causes mount failures (the same reason the AKS
+  # azureKeyvaultSecretsProvider add-on must stay off).
+  secrets-store-csi-driver:
+    install: false
+
+  logFormatJSON: true
+
+  linux:
+    enabled: true
+    tolerations:
+      - operator: "Exists"
+    priorityClassName: system-node-critical
+    resources:
+      requests:
+        cpu: 50m
+        memory: 100Mi
+      limits:
+        cpu: 200m
+        memory: 200Mi
+
+  windows:
+    enabled: false
+
+# ---- Retain StorageClass (see templates/retain-storageclass.yaml) ----
+# Consumed by rabbitmq, elasticsearch and observability (Grafana, Prometheus, Loki,
+# Tempo) -- those charts reference the name and must never create it.
+retainStorageClass:
+  enabled: true
+  name: platform-retain
+  # Azure Disk CSI. Same provisioner as the built-in managed-csi class; only the
+  # reclaimPolicy differs. On-prem clusters override the provisioner.
+  provisioner: disk.csi.azure.com
+  allowVolumeExpansion: true
+  parameters:
+    # StandardSSD_LRS: the platform's stateful volumes are small and latency-
+    # tolerant (queues, indices, a SQLite file). Premium_LRS if a component turns
+    # out to be IOPS-bound.
+    skuName: StandardSSD_LRS
+
+# ---- SecretProviderClasses templated by THIS chart (optional) ----
+# SPCs are normally owned by the consuming chart, next to the pod that mounts
+# them -- keep it that way. This list exists for centrally-owned and smoke-test
+# cases only, and is empty by default.
+#
+# Each item: { name, enabled, namespace?, provider?, labels?, secretObjects?, parameters }
+# Any SPC added here MUST carry useVMManagedIdentity: "false" and the consuming
+# workload's clientID.
+secretProviderClasses: []
+
+commonLabels: {}
+nameOverride: ""
+fullnameOverride: ""

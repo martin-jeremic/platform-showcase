@@ -1,0 +1,78 @@
+# product-a-api CD to DEV. Register as `product-a-api-cd`.
+#
+# Dev is the only push-based environment (pipeline -> helm upgrade). Stage, demo and prod are
+# delivered by Argo CD from product-a-gitops; main-branch CI promotes the recorded dev digest there
+# behind approvals, and nothing in this file touches them.
+#
+# SCHEMA FIRST, CODE SECOND, as an explicit stage dependency:
+#   RefusePlaceholders -> Migrate_Dev (product-a-db Job, same digest, --wait-for-jobs) -> Deploy_Dev
+# On dev this ordering is a real interlock because it is ONE linear pipeline. In the GitOps
+# environments the Job chart is its own Argo Application and nothing orders the two; there the
+# migration lint (expand/contract) is what keeps an older image compatible with a newer schema.
+
+trigger: none
+
+parameters:
+  # The escape hatch: a failed migration Job blocks the deploy, including the build that would fix
+  # a DATA-level migration failure. Untick for ONE run to deploy past it. A parameter, not a hand
+  # edit, on purpose: an edit made in a hurry is a commit nobody remembers to revert, while the
+  # parameter's default puts the gate back on the next run. (product-b deliberately has no such
+  # switch; see app/product-b/deploy/pipelines/CD.yml.)
+  - name: runMigrations
+    displayName: Run schema migrations (untick ONCE to deploy past a failing migration)
+    type: boolean
+    default: true
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+  pipelines:
+    - pipeline: ci
+      source: product-a-api-ci
+      trigger:
+        branches:
+          include:
+            - develop
+
+variables:
+  devNamespace: product-a-dev
+  # The CI run is named after the version (versioning template), so runName IS the version:
+  # chart version == image tag, both stamped by the same CI run.
+  version: $(resources.pipeline.ci.runName)
+
+stages:
+  # Committed dev values may hold <<MARKER>> placeholders for facts still being gathered. They fail
+  # the deploy here, naming file, line and marker, instead of as a pod that will not start.
+  - template: stages/refuse-placeholders-stage.yml@templates
+    parameters:
+      valuesFiles:
+        - src/Api/helm/product-a-api/values-dev.yaml
+        - charts/product-a-db/values-dev.yaml
+
+  - template: stages/migration-deploy-stage.yml@templates
+    parameters:
+      dependsOn: [RefusePlaceholders]
+      # Only develop builds deploy. A custom condition REPLACES the implicit succeeded(), so it is
+      # spelled out; without it a failed placeholder check did not stop the migration.
+      condition: and(succeeded(), eq(variables['resources.pipeline.ci.sourceBranch'], 'refs/heads/develop'))
+      namespace: $(devNamespace)
+      chartName: product-a-db
+      imageName: product-a-api
+      version: $(version)
+      valuesFile: charts/product-a-db/values-dev.yaml
+      runMigrations: ${{ parameters.runMigrations }}
+
+  - template: stages/deploy-environment-stage.yml@templates
+    parameters:
+      dependsOn: [Migrate_Dev]
+      condition: and(succeeded(), eq(variables['resources.pipeline.ci.sourceBranch'], 'refs/heads/develop'))
+      namespace: $(devNamespace)
+      chartName: product-a-api
+      imageName: product-a-api
+      version: $(version)
+      valuesFile: src/Api/helm/product-a-api/values-dev.yaml
+      # Room for the CSI mount and image pull on a plain rollout; the Job is the stage above's problem.
+      helmTimeout: 10m

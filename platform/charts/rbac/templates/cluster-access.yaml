@@ -1,0 +1,77 @@
+{{- include "rbac.validate" . -}}
+{{- /*
+Cluster-scoped grants: the namespace lister, plus any optional read-only tiers.
+
+Nothing here can grant cluster-admin — clusterBindings[].clusterRole is validated
+against view|edit|admin. The admin tier is AKS's, wired internally from
+admin_group_object_ids, and duplicating it in a manifest would create a second
+owner for the most dangerous binding on the cluster.
+*/ -}}
+{{- if .Values.namespaceLister.enabled }}
+{{- $listerName := .Values.namespaceLister.name | default "namespace-lister" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $listerName }}
+  labels:
+    {{- include "rbac.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  {{- /* Namespaced `edit` grants nothing cluster-wide, so without this a developer
+         with perfectly good access gets Forbidden the moment kubectl, k9s or Lens
+         tries to enumerate namespaces at startup. Read-only. */}}
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.namespaceLister.includeNodes }}
+  {{- /* Node objects expose labels, taints and capacity — not workloads. Needed by
+         `kubectl describe node`, scheduling diagnostics and most dashboards. */}}
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $listerName }}
+  labels:
+    {{- include "rbac.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $listerName }}
+subjects:
+  {{- /* Every namespace group, automatically. No separate "devs" group to keep in
+         sync — a namespace added above is listed here in the same commit. */}}
+  {{- range .Values.namespaces }}
+  - kind: Group
+    name: {{ .entraGroupId | quote }}
+    apiGroup: rbac.authorization.k8s.io
+  {{- end }}
+{{- end }}
+
+{{- range .Values.clusterBindings }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "rbac.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    example.com/entra-group: {{ .entraGroupName | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .clusterRole }}
+subjects:
+  - kind: Group
+    name: {{ .entraGroupId | quote }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -1,0 +1,15 @@
+{{- range $rg := .Values.referenceGrants }}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ $rg.name }}
+  namespace: {{ default $.Release.Namespace $rg.namespace }}
+  labels:
+    {{- include "platform-traefik.labels" $ | nindent 4 }}
+spec:
+  from:
+    {{- toYaml $rg.from | nindent 4 }}
+  to:
+    {{- toYaml $rg.to | nindent 4 }}
+{{- end }}

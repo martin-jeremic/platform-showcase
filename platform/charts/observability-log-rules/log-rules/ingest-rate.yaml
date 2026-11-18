@@ -1,0 +1,43 @@
+# Inbound message rate of product-a-module (Loki ruler, LogQL). Shipped when
+# rules.ingestRate is true (set per tenant in the gitops values).
+#
+# A RAW Loki rule-group file, shipped verbatim by templates/configmap.yaml
+# (.Files.Get, NOT tpl): the Prometheus template syntax in annotations passes
+# through to the ruler untouched.
+#
+# INPUT: the module logs 'Ingested message=<id> ...' once per NEW message --
+# after its in-memory and database dedup. The line used to begin with a
+# '[IngestionWorker] ' prefix; the log contract dropped such class-name prefixes
+# because `logger` carries the name, and matching on 'Ingested message=' counts
+# both spellings. Deliberately not the poll summary line ('poll complete ...
+# Messages=N'): each poll re-reports messages already seen, so that count
+# overstates what arrived.
+#
+# service_name is not set by the collector: Loki derives it from the `app` label,
+# which Alloy takes from the pod's app.kubernetes.io/name.
+#
+# THRESHOLD: more than 25 new messages in one minute. The 7-day peak when this was
+# written was 3 in a minute. The "Product A / Ingest rate" dashboard
+# (observability dashboards/Product/ingest-rate.json) draws this number as a
+# line; tools/check-dashboard-threshold.py fails CI if the two differ.
+#
+# No `for`: evaluated every minute over the last minute, so each minute is counted
+# once and a single minute above the threshold fires. It resolves (with a
+# "resolved" mail -- severity warning) at the first minute back under it.
+groups:
+  - name: platform.logs.ingest
+    interval: 1m
+    rules:
+      - alert: PlatformInboundRateHigh
+        expr: |
+          sum by (cluster, namespace, service_name) (
+            count_over_time({service_name="product-a-module"} |= "Ingested message=" [1m])
+          ) > 25
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_name }} received {{ $value }} messages in one minute"
+          description: >-
+            {{ $labels.service_name }} in {{ $labels.namespace }} on
+            {{ $labels.cluster }} ingested {{ $value }} new messages in the last
+            minute (threshold 25). A loop, a flood, or a backlog arriving at once.

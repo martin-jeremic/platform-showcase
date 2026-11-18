@@ -1,0 +1,21 @@
+# product-b-db: schema migration Job. Same pattern as app/product-a/charts/product-a-db (plain
+# Job, digest + runNonce name, backoffLimit 0, no TTL, own synced Secret name); read that chart for
+# the full reasoning. The differences are listed in templates/migration-job.yaml.
+
+fullnameOverride: ""
+
+image:
+  repository: productacr.azurecr.io/product-b-api      # the migrator ships inside the API image
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# The migrator connects as the database OWNER role (deploy/db-bootstrap), not as the runtime role
+# the API uses: DDL rights live only in this Job.
+secretName: product-b-db-secrets
+
+migrationJob:
+  enabled: false
+  mode: verify            # verify | migrate
+  backoffLimit: 0
+  activeDeadlineSeconds: 1200
+  runNonce: "0"

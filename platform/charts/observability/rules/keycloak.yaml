@@ -1,0 +1,27 @@
+# Identity alerts. Job = the keycloak chart's Service name, `keycloak` (jobLabel
+# unset on its ServiceMonitor). Confirm against live Prometheus before flipping
+# prometheusRules.files.keycloak -- a wrong job= never fires and never errors.
+#
+# "Was there, now gone" rather than absent(): `max_over_time(up[7d]) unless
+# up == 1`, by cluster (the rules/spokes.yaml shape). It fires both when every
+# target is down AND when the target list is empty because the endpoints went with
+# the pod -- the two shapes absent(up{...} == 1) covered -- but per cluster: on the
+# hub, one cluster's healthy Keycloak can no longer hide another's being down. A
+# cluster that never ran Keycloak never fires.
+groups:
+  - name: platform.keycloak
+    rules:
+      - alert: PlatformKeycloakDown
+        expr: |
+          max by (cluster) (max_over_time(up{job="keycloak"}[7d]))
+          unless
+          max by (cluster) (up{job="keycloak"} == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Keycloak is down on {{ $labels.cluster }}"
+          description: >-
+            No healthy scrape of job keycloak on {{ $labels.cluster }} for 5m. ALL
+            SSO logins there are failing: the application UI, Grafana and Argo CD.
+            Existing sessions survive until their tokens expire.

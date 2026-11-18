@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "mongo.fullname" . }}
+  labels:
+    {{- include "mongo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "mongo.fullname" . }}-headless
+  selector:
+    matchLabels:
+      {{- include "mongo.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.reloader.enabled }}
+        # Stakater Reloader: watch for Secret changes and restart the pod.
+        # OFF by default here -- a restart cannot apply a rotated password to an
+        # already-initialized mongod. See the note in values.yaml.
+        reloader.stakater.com/match: "true"
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "mongo.selectorLabels" . | nindent 8 }}
+        {{- if and .Values.azureKeyVault.enabled (eq .Values.azureKeyVault.authMode "workloadIdentity") }}
+        # Without this label the webhook never projects the token, and the CSI
+        # mount fails although the ServiceAccount annotation looks right.
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "mongo.serviceAccountName" . }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mongo
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- toYaml .Values.args | nindent 12 }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: mongodb
+              containerPort: 27017
+              protocol: TCP
+          env:
+            # Username is non-secret and set directly from values.
+            - name: MONGO_INITDB_ROOT_USERNAME
+              value: {{ .Values.auth.username | quote }}
+            # Password comes from the CSI-synced Secret or an existingSecret --
+            # mongo.secretName resolves which, and
+            # mongo.passwordKey resolves the key inside it.
+            #
+            # ⚠ BOTH of these are read by the entrypoint ONLY when /data/db is empty.
+            # After first boot they are inert. Changing them does not change the password
+            # in the database -- see "Rotating the admin password" in the platform/charts README (mongo).
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mongo.secretName" . }}
+                  key: {{ include "mongo.passwordKey" . }}
+            - name: MONGO_INITDB_DATABASE
+              value: {{ .Values.auth.database | quote }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- omit .Values.startupProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            {{- omit .Values.readinessProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- omit .Values.livenessProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # mongod's default dbPath. Mounted at the volume root, NOT via subPath.
+            #
+            # The subPath trick exists because MySQL/Postgres decide "is this a fresh
+            # install?" by checking whether the directory is EMPTY, and ext4 volumes on
+            # Azure managed disks always contain lost+found, which makes them look
+            # non-empty. Mongo's entrypoint instead looks for specific marker files
+            # (WiredTiger, journal, local.0, storage.bson), so lost+found does not fool
+            # it and the extra indirection would buy nothing.
+            - name: mongo-data
+              mountPath: /data/db
+            {{- if .Values.azureKeyVault.enabled }}
+            # Load-bearing even though the password is consumed as an env var above:
+            # the Secrets Store CSI driver only materializes (and keeps refreshing) its
+            # secretObjects Secret while a pod actually MOUNTS the SecretProviderClass.
+            # Drop this mount and mongo-kv-sync is never created, so the secretKeyRef
+            # above resolves to nothing and the pod never starts.
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: mongo-data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.azureKeyVault.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.azureKeyVault.secretProviderClassName }}
+            {{- if eq .Values.azureKeyVault.authMode "servicePrincipal" }}
+            # servicePrincipal ONLY; under any other mode it would make the driver
+            # prefer the static credential and silently ignore the identity.
+            nodePublishSecretRef:
+              name: {{ .Values.azureKeyVault.credentialsSecretName | default "secrets-store-creds" }}
+            {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: mongo-data
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        # Always explicit: an empty class means the cluster default, reclaimPolicy
+        # Delete. volumeClaimTemplates are immutable, so this is decided at FIRST
+        # install and cannot be retrofitted.
+        storageClassName: {{ required "persistence.storageClass is required (platform-retain on AKS)" .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

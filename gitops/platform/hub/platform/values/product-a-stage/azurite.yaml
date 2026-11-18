@@ -1,0 +1,7 @@
+# A LoadBalancer VIP for workstation tools (Storage Explorer, azcopy).
+persistence:
+  storageClass: platform-retain
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.io/loadBalancerIPs: "10.0.0.245"

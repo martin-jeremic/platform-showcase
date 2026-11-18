@@ -1,0 +1,27 @@
+apiVersion: v2
+name: grafana-sso-gateway
+description: >-
+  Exposes the observability stack (Grafana, optionally Prometheus / Loki) through
+  the platform Traefik Gateway and wires Grafana login to Keycloak via OIDC. It
+  ATTACHES to the Gateway the traefik chart owns rather than creating one: the
+  forked chart templated its own Gateway and Certificate, which on a single-host
+  cluster would be a second, competing owner of the same edge. It renders the
+  non-sensitive OIDC configuration only -- there is no values key that could hold
+  the client secret.
+type: application
+# 1.0.1 -- two route fixes, both of which produced a 404 on /monitoring/grafana:
+#   * httproute.yaml templated parentRefs.namespace from .Release.Namespace instead
+#     of .Values.gateway.namespace, so the route adopted observability/
+#     traefik-gateway (nonexistent) and was never attached.
+#   * routes.{grafana,prometheus}.service named the Services after the release
+#     rather than the fullnameOverride the observability chart actually pins.
+# 1.0.2 -- comment-only: values.yaml documents the envValueFrom wiring for the
+#   hand-seeded Grafana OIDC client secret. Cut because the content drifted past
+#   the 1.0.1 tag without a bump (the gap tools/chart-version.sh now closes).
+version: 1.0.2
+appVersion: "1.0"
+keywords:
+  - grafana
+  - keycloak
+  - oidc
+  - gateway-api

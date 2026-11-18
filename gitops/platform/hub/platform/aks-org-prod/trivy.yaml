@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'trivy' to 'aks-org-prod'.
+chartPath:     trivy
+chartRevision: trivy-0.3.1   # pinned git tag -- the pin that makes rollback possible
+releaseName:   trivy
+namespace:     trivy
+syncWave:      "5"

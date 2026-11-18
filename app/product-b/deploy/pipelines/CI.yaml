@@ -1,0 +1,110 @@
+# product-b-api CI. Register as `product-b-api-ci`; CD.yml triggers on it.
+#
+#   develop: convention checks -> version -> hermetic tests -> build product-b-api ONCE ->
+#            deploy-meta artifact -> push the product-b-api AND product-b-db charts at the SAME
+#            version. The migrator ships inside the API image, so the two charts can never carry
+#            different versions.
+#   main:    the same, until promotion exists. product-b has no gitops folder yet: dev is push-based
+#            (CD.yml) and nothing else is deployed.
+#
+# Path filters: domain and platform layers only. The agent layer (src/3-agents) and the web app have
+# their own pipelines, and a change there must not rebuild the API (the layering rule, see README).
+
+trigger:
+  branches:
+    include:
+      - develop
+      - main
+  paths:
+    include:
+      - src/1-domain/**
+      - src/2-platform/**
+      - deploy/charts/product-b-api/**
+      - deploy/charts/product-b-db/**
+      - Directory.Build.props
+      - Directory.Packages.props
+      - global.json
+    exclude:
+      - src/2-platform/ProductB.Mcp/**
+      - src/2-platform/ProductB.Worker/**
+      - deploy/charts/**/values-dev.yaml
+
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  - template: stages/convention-checks-stage.yml@templates
+
+  - template: stages/versioning-gitversion.yml@templates
+    parameters:
+      gitVersionConfig: GitVersion.yml
+
+  # Hermetic suites only. The architecture suite (~8 min, ~6 GB) and the integration suite (needs
+  # PostgreSQL) run nightly (nightly.yml) and gate nothing.
+  - template: stages/pr-dotnet-stage.yml@templates
+    parameters:
+      stageName: Test
+      dependsOn: [ConventionChecks]
+      solution: ProductB.sln
+      suites:
+        - tests/ProductB.Domain.Tests/ProductB.Domain.Tests.csproj
+        - tests/ProductB.Application.Tests/ProductB.Application.Tests.csproj
+
+  - template: stages/build-stage.yml@templates
+    parameters:
+      dependsOn: [Versioning, Test]
+      # develop builds are prereleases (isReleaseReady is only true on main), and dev is exactly
+      # where they must deploy, so the gate is off for this product.
+      requireReleaseReady: false
+      acrName: productacr
+      armServiceConnection: arm-product-a
+      images:
+        - name: product-b-api
+          dockerfile: src/2-platform/ProductB.Api/Dockerfile
+          buildContext: .
+      chartName: product-b-api
+      chartDir: deploy/charts/product-b-api
+
+  # The companion Job chart, same version, same run. build-stage.yml pushes one chart; until it
+  # takes a companion (as build-or-promote-stage.yml does with secondHelmChartPath) this stage does
+  # the second push. Versioned by `helm package --version`, never by editing Chart.yaml.
+  - stage: PushDbChart
+    displayName: Push product-b-db chart (same version)
+    dependsOn: [Versioning, BuildAndPush]
+    condition: succeeded()
+    variables:
+      chartVersion: $[ stageDependencies.Versioning.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+    jobs:
+      - job: Push
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - task: HelmInstaller@1
+            displayName: Install Helm 4.2.0
+            inputs:
+              helmVersionToInstall: '4.2.0'
+          - task: AzureCLI@2
+            displayName: helm package + push product-b-db
+            inputs:
+              azureSubscription: arm-product-a
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az acr login --name "$ACR_NAME" --expose-token --output tsv --query accessToken \
+                  | helm registry login "$ACR_NAME.azurecr.io" \
+                      --username 00000000-0000-0000-0000-000000000000 --password-stdin
+                helm package deploy/charts/product-b-db \
+                  --version "$CHART_VERSION" --app-version "$CHART_VERSION" --destination "$AGENT_TEMPDIRECTORY"
+                helm push "$AGENT_TEMPDIRECTORY/product-b-db-$CHART_VERSION.tgz" "oci://$ACR_NAME.azurecr.io/helm"
+            env:
+              ACR_NAME: productacr
+              CHART_VERSION: $(chartVersion)

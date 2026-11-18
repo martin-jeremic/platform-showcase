@@ -1,0 +1,40 @@
+# CD for the four HR SPAs (company GitOps promote). Register as `hr-app-cd`.
+#
+# Promotes every app built by the triggering CI run by writing its gitops descriptors; never
+# rebuilds. Each app is its own Argo Application of the shared hr-app chart, and the template
+# creates one deployment job per app:
+#   Promote_Dev       apps/hr-<app>/dev/       from deploy-meta-hr-<app>, automatic
+#   Promote_Services  apps/hr-<app>/services/  copies the dev digest, behind the `Production`
+#                     environment approval: four approvals under one stage, and one failing app does
+#                     not hide the others.
+# CI builds all four on every release (see CI.yml), so there is no "which apps changed" list to
+# parse here. A CI run without a release published no artifacts, so the download fails loudly.
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+    - repository: gitops
+      type: git
+      name: platform/services-gitops
+  pipelines:
+    - pipeline: ci
+      source: hr-app-ci
+      trigger:
+        branches:
+          include:
+            - main
+
+stages:
+  - template: stages/promote-stage.yml@templates
+    parameters:
+      apps:
+        - hr-portal
+        - hr-admin
+        - hr-absence
+        - hr-employee-book
+      metaPipelineAlias: ci

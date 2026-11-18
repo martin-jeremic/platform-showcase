@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (git-ignored) only to override a default. This stack
+# needs no secrets.
+#
+# Deliberately ABSENT: kubernetes_version and the power-schedule times. Change their
+# defaults in variables.tf, so what production runs is in git; a value here would
+# silently override the reviewed default with a clean plan.
+
+# subscription_id = "11111111-1111-1111-1111-111111111111"
+# tenant_id       = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+# sku_tier        = "Free"
+
+# node_vm_size         = "Standard_E4as_v6"
+# node_count           = 1
+# node_os_disk_size_gb = 128
+
+# legacy_node_pool_enabled = false

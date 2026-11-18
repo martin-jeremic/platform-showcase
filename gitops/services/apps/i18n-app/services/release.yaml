@@ -1,0 +1,10 @@
+# Env descriptor read by the `services` ApplicationSet. Its PRESENCE deploys i18n-app to services.
+# chart.version is written by the CD promotion; chart.name and destination are hand-seeded once.
+chart:
+  name: "i18n-app"
+  version: "1.2.2"
+# services = the registered spoke. `server` stays present and empty: missingkey=error.
+destination:
+  server: ""
+  name: "aks-org-prod"
+  namespace: i18n

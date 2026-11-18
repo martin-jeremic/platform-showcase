@@ -1,0 +1,27 @@
+{{- /*
+Public (non-sensitive) SPA configuration, consumed by entrypoint.sh through envFrom. Every key is
+`required` (see values.yaml for why an empty value is worse than a failed render) and written out
+explicitly: no `range` over env, so a misspelt key fails the render instead of becoming a variable
+the entrypoint never reads.
+*/ -}}
+{{- if .Values.configMap.create }}
+{{- $e := .Values.env }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hr-app.configMapName" . }}
+  labels:
+    {{- include "hr-app.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  IDENTITY_URL: {{ required "env.IDENTITY_URL is required" $e.IDENTITY_URL | quote }}
+  IDENTITY_SCOPE: {{ required "env.IDENTITY_SCOPE is required" $e.IDENTITY_SCOPE | quote }}
+  IDENTITY_CLIENT: {{ required "env.IDENTITY_CLIENT is required" $e.IDENTITY_CLIENT | quote }}
+  IDENTITY_REDIRECT_URI: {{ required "env.IDENTITY_REDIRECT_URI is required" $e.IDENTITY_REDIRECT_URI | quote }}
+  API_URL: {{ required "env.API_URL is required" $e.API_URL | quote }}
+  APP_PORTAL_PATH: {{ required "apps.portal is required" .Values.apps.portal | quote }}
+  APP_ADMIN_PATH: {{ required "apps.admin is required" .Values.apps.admin | quote }}
+  APP_ABSENCE_PATH: {{ required "apps.absence is required" .Values.apps.absence | quote }}
+  APP_EMPLOYEE_BOOK_PATH: {{ required "apps.employeeBook is required" .Values.apps.employeeBook | quote }}
+{{- end }}

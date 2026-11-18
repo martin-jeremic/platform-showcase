@@ -1,0 +1,31 @@
+# Lint/template values: the shape of gitops/apps/apps/product-a-referencedata/<env>/. The digest is
+# sha256("ci"), not a real image.
+image:
+  digest: sha256:1b158839f8aa339e89bb50b1603e90ec68e0fd5565fe10a7cb32729fddf7070a
+workloadIdentity:
+  enabled: true
+  clientId: 66666666-6666-6666-6666-666666666666
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-stage
+  tenantId: 11111111-1111-1111-1111-111111111111
+config:
+  environment: Stage
+  broker:
+    host: rabbitmq.rabbitmq.svc.cluster.local
+    username: product-a-referencedata-stage
+datasets:
+  countries:
+    enabled: true
+    schedule: "15 7 * * 1"
+  locations:
+    enabled: true
+    schedule: "0 2 1 1,7 *"
+  commodityCodes:
+    enabled: true
+    schedule: "0 2 1 1 *"
+    # Source not verified yet: keep the CronJob, skip the deploy-time seed.
+    seedOnDeploy: false
+  retiredFeed:
+    enabled: false
+    schedule: "0 3 * * *"

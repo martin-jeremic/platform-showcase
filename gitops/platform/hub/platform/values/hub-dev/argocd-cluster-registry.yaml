@@ -1,0 +1,21 @@
+# Spoke registrations. Tokens are Key Vault secrets (ESO, workload identity);
+# nothing secret below. caData is a placeholder (base64 of "placeholder-ca").
+clusters:
+  - name: aks-org-prod
+    server: https://aks-org-prod.hcp.westeurope.azmk8s.io:443
+    caData: cGxhY2Vob2xkZXItY2E=
+    labels:
+      env: prod
+    akvKey: argocd-aks-org-prod-token
+  - name: product-a-stage
+    server: https://10.0.0.26:16443
+    caData: cGxhY2Vob2xkZXItY2E=
+    labels:
+      env: stage
+    akvKey: argocd-product-a-stage-token
+  - name: aks-product-a-demo
+    server: https://aks-product-a-demo.hcp.westeurope.azmk8s.io:443
+    caData: cGxhY2Vob2xkZXItY2E=
+    labels:
+      env: demo
+    akvKey: argocd-aks-product-a-demo-token

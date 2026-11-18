@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'log-rules-aks-product-a-prod' to 'aks-product-a-prod'.
+chartPath:     observability-log-rules
+chartRevision: observability-log-rules-0.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   log-rules-aks-product-a-prod
+namespace:     observability
+syncWave:      "7"

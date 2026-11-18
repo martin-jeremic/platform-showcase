@@ -1,0 +1,47 @@
+{{- /*
+Traefik Middleware CRDs -- security headers and rate limiting.
+
+List-driven so a new middleware is a values entry, not a template change. Each
+item: { name, enabled, namespaces, spec } where `spec` is the raw Middleware .spec.
+
+ONE OBJECT PER NAMESPACE. ExtensionRef is namespace-local: Traefik resolves the
+Middleware in the SAME namespace as the HTTPRoute that references it, not the
+Gateway's. A route in ns `keycloak` referencing a Middleware that only exists in ns
+`traefik` fails to attach. `namespaces` lists every namespace whose routes use the
+item; empty means the release namespace only.
+
+HOW A ROUTE USES ONE. Gateway API has no native header/rate-limit filter, so an
+HTTPRoute attaches these via the ExtensionRef filter:
+
+  filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: traefik.io
+        kind: Middleware
+        name: auth-ratelimit
+
+security-headers is NOT attached per route: values.yaml puts it on the websecure
+entrypoint, so every HTTPS response carries HSTS whether or not a route remembers.
+
+REQUIRES providers.kubernetesCRD, exactly as TLSOption does -- see tlsoption.yaml.
+*/ -}}
+{{- range $m := .Values.middlewares }}
+{{- if $m.enabled }}
+{{- $namespaces := $m.namespaces | default (list $.Release.Namespace) }}
+{{- if and $m.namespaces (not (has $.Release.Namespace $m.namespaces)) }}
+{{- $namespaces = prepend $m.namespaces $.Release.Namespace }}
+{{- end }}
+{{- range $ns := $namespaces }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $m.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "platform-traefik.labels" $ | nindent 4 }}
+spec:
+  {{- toYaml $m.spec | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}

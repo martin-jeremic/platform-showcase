@@ -1,0 +1,85 @@
+# Non-secret services overrides for the payments-api chart, release payments-api, cluster aks-org-prod (registered spoke).
+# Hand-maintained: the CD promotion never touches this file (it writes image.yaml and moves
+# chart.version in release.yaml only).
+
+# ── Routing: path-per-app on the single host services.example.com (README, path allocation) ──
+# sectionName pins the route to the TLS listener; without it the route also binds the plain-HTTP
+# listener and the app answers on :80. Listener hostnames match EXACTLY: a stale per-app hostname
+# reports NoMatchingParent while Argo still shows Synced/Healthy.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: true
+  hostnames:
+    - services.example.com
+  path: /payments-api
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+# The node identity holds AcrPull on the registry: no pull secret. A reference to one that does
+# not exist logs "Unable to retrieve pull secret" on every pod while the pull succeeds: noise that
+# hides real failures.
+imagePullSecrets: []
+
+# ── Configuration (ConfigMap) ────────────────────────────────────────────────────────────────
+# Everything that is not a secret. The chart renders `env` into a ConfigMap whose keys reach the
+# pod as environment variables ("__" separates .NET configuration sections, bound into
+# IOptions<T>); Reloader restarts the pod when it changes. The image loads no config file in the
+# cluster, so this block IS the service's non-secret configuration; the chart's configmap.yaml
+# lists every key it accepts.
+env:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  Api__Name: "Payments"
+  App__UseSwagger: "false"
+  # Migrations run as a deploy step, never from the app at startup.
+  App__MigrateOnStartup: "false"
+  Identity__Authority: "https://services.example.com/keycloak/realms/org"
+  Identity__ClientId: "payments-api"
+  Database__Server: "sql-org.database.windows.net"
+  Database__Name: "payments"
+  RabbitMq__HostName: "rabbitmq.rabbitmq.svc.cluster.local"
+  RabbitMq__Port: "5672"
+  RabbitMq__UserName: "payments-api"
+  RabbitMq__Exchange: "org.events"
+  Provider__BaseUrl: "https://api.payments-provider.example.com"
+  Provider__IsSandbox: "false"
+
+# ── Secrets (Secrets Store CSI driver) ───────────────────────────────────────────────────────
+# Only real secrets, one PLAIN value per Key Vault object (no JSON blobs, no Base64), each synced
+# into the pod as one environment variable:
+#   payments-api--database
+#   payments-api--identity-client-secret
+#   payments-api--broker-password
+#   payments-api--provider-api-key
+#   payments-api--secrets-key-k1      (same value as payments-email--secrets-key-k1: one service writes what the other decrypts)
+# The driver fails the WHOLE mount if one object is missing: the pod sits in ContainerCreating
+# with no useful event while Argo shows Synced. Seed first, promote second:
+#   VAULT=kv-org-prod bash bootstrap/populate-kv.sh payments-api database identity-client-secret broker-password provider-api-key
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-org-prod
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  # The driver authenticates as the node pool's identity, which holds Key Vault Secrets User on
+  # kv-org-prod. kubeletClientId is the CLIENT id of that identity, NOT the object (principal) id
+  # from the role assignment: they are different GUIDs, and swapping them fails the mount.
+  authMode: vmManagedIdentity
+  kubeletClientId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+# ── Capacity ─────────────────────────────────────────────────────────────────────────────────
+# aks-org-prod is a single node that also hosts the identity provider, the broker, the gateway
+# and monitoring. Autoscaling stays off on purpose: a chart default of maxReplicas 10 cannot fit
+# and would only pile up Pending pods. Revisit when a second node is added.
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

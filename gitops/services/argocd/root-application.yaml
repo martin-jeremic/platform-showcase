@@ -1,0 +1,27 @@
+# App-of-apps root. Applied by hand, once, on the hub:
+#   kubectl -n argocd-hub apply -f argocd/root-application.yaml
+# It renders argocd/ through kustomize (the AppProjects + the appset only) and keeps them in sync.
+#
+# Project `default`, not one of the services-<namespace> projects: it must create AppProject and
+# ApplicationSet objects in argocd-hub, which those restricted projects (business namespaces only)
+# forbid.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: services-root
+  namespace: argocd-hub
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://dev.azure.com/example-org/platform/_git/services-gitops
+    targetRevision: main
+    path: argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd-hub
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

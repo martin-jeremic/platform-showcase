@@ -1,0 +1,28 @@
+# Listed by ../catalog-info.yaml.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: product-a-module
+  title: Analysis module
+  description: >-
+    FastAPI service: multi-step LLM extraction over one document, tool calls to the platform API
+    over MCP. Reads its prompts from the platform's prompt governance and fails closed.
+  tags: [python, fastapi, mcp, llm]
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: product-a/product-a
+    dev.azure.com/build-definition: product-a-module-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/product-a/_git/product-a?path=/src/module
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-a-module
+    argocd/app-selector: example.com/service=product-a-module
+    key-vault/secret-prefix: product-a-module--secret--
+spec:
+  type: service
+  lifecycle: production
+  owner: product-a-team
+  system: product-a
+  dependsOn:
+    - component:product-a-api
+    - resource:llm-product-a
+    - resource:product-a-identity
+    - resource:product-a-key-vault

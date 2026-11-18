@@ -1,0 +1,15 @@
+apiVersion: v2
+name: oidc-issuer
+description: >-
+  Publishes an on-prem (MicroK8s) cluster's service-account token issuer to the
+  internet so Microsoft Entra can verify the cluster's tokens -- workload identity
+  federation without AKS. Routes exactly two kube-apiserver paths, the OIDC
+  discovery document and the JWKS, through the cluster's Traefik Gateway. The keys
+  are served live by the apiserver, so nothing is copied and nothing goes stale on
+  key rotation. AKS clusters have a managed issuer and do not need this chart.
+type: application
+version: 0.1.0
+keywords:
+  - oidc
+  - workload-identity
+  - gateway-api

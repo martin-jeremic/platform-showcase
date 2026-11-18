@@ -1,0 +1,50 @@
+# Non-secret dev overrides for the payments-invoicing chart, release payments-invoicing, cluster hub-dev (the hub itself, in-cluster).
+# Hand-maintained: the CD promotion never touches this file (it writes image.yaml and moves
+# chart.version in release.yaml only).
+
+# Background worker: consumes the broker, serves no HTTP route.
+route:
+  enabled: false
+
+# On-prem hub: images are pulled with the namespace pull secret.
+imagePullSecrets:
+  - name: orgacr-pull
+
+# ── Configuration (ConfigMap) ────────────────────────────────────────────────────────────────
+env:
+  DOTNET_ENVIRONMENT: "Development"
+  RabbitMq__HostName: "rabbitmq.rabbitmq.svc.cluster.local"
+  RabbitMq__Port: "5672"
+  RabbitMq__UserName: "payments-invoicing"
+  RabbitMq__Queue: "payments.invoicing"
+  RabbitMq__PrefetchCount: "10"
+  Database__Server: "sql-org-dev.database.windows.net"
+  Database__Name: "payments"
+
+# ── Secrets (Secrets Store CSI driver) ───────────────────────────────────────────────────────
+# Only real secrets, one PLAIN value per Key Vault object (no JSON blobs, no Base64), each synced
+# into the pod as one environment variable:
+#   payments-invoicing--database
+#   payments-invoicing--broker-password
+# The driver fails the WHOLE mount if one object is missing: the pod sits in ContainerCreating
+# with no useful event while Argo shows Synced. Seed first, promote second:
+#   VAULT=kv-org-dev bash bootstrap/populate-kv.sh payments-invoicing database broker-password
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-org-dev
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  # On-prem hub: no node identity exists, so the driver authenticates with the namespace's
+  # `secrets-store-creds` service principal (argocd/setup/secret-secrets-store-creds.yaml).
+  authMode: servicePrincipal
+
+# ── Capacity ─────────────────────────────────────────────────────────────────────────────────
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

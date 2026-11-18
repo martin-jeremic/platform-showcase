@@ -1,0 +1,46 @@
+# Dev values (push-based). Dev is the one environment NOT reconciled by Argo CD: the CD pipeline
+# runs `helm upgrade` with this file and the digest of the CI run that triggered it. Stage, demo and
+# prod values live in gitops/apps (apps/product-a-api/<env>/values.yaml) and nowhere else.
+# Non-sensitive only: secrets come from kv-product-a-dev through the CSI driver. A change to this
+# file alone triggers CD-config.yml (a values-only redeploy), not a rebuild.
+
+# Dev runs on the on-prem hub (MicroK8s): no kubelet identity, so the namespace pull secret the
+# platform layer creates is named here.
+imagePullSecrets:
+  - name: productacr-pull
+
+workloadIdentity:
+  enabled: true
+  clientId: "77777777-7777-7777-7777-777777777777"
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-dev
+  tenantId: "11111111-1111-1111-1111-111111111111"
+
+replicaCount: 1
+podDisruptionBudget:
+  enabled: false
+
+config:
+  environment: Dev
+  logLevel: Debug
+  identity:
+    authority: https://dev.example.com/keycloak/realms/product-a-dev
+    audience: product-a-api
+    clientId: product-a-api
+  broker:
+    host: rabbitmq.rabbitmq.svc.cluster.local
+    virtualHost: /product-a
+    username: product-a-dev
+  moduleBaseUrl: http://product-a-module
+  adminOperations:
+    enabled: true
+
+gateway:
+  enabled: true
+route:
+  enabled: true
+  hostnames:
+    - dev.example.com
+  path: /product-a/admin/api

@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'oidc-issuer' to 'hub-dev'.
+chartPath:     oidc-issuer
+chartRevision: oidc-issuer-0.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   oidc-issuer
+namespace:     default
+syncWave:      "2"

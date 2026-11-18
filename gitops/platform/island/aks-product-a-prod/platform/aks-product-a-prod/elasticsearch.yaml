@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'elasticsearch' to 'aks-product-a-prod'.
+chartPath:     elasticsearch
+chartRevision: elasticsearch-1.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   elasticsearch
+namespace:     infrastructure
+syncWave:      "3"

@@ -1,0 +1,100 @@
+# platform/catalog.yaml -- component invariants for the island, defined once.
+#
+# NOT read by Argo CD (platform/*.yaml is outside the platform/<cluster>/*.yaml
+# glob). component.sh scaffolds descriptors from it; `chartRevision` is the tag a
+# NEW descriptor starts on -- the live pin is the descriptor's own.
+components:
+  secrets-store-csi:
+    chartPath: secrets-store-csi
+    chartRevision: secrets-store-csi-1.0.1
+    releaseName: secrets-store-csi
+    namespace: secrets-store-csi
+    syncWave: "0"
+  cert-manager:
+    chartPath: cert-manager
+    chartRevision: cert-manager-1.1.0
+    releaseName: cert-manager
+    namespace: cert-manager
+    syncWave: "1"
+  traefik:
+    chartPath: traefik
+    chartRevision: traefik-1.2.0
+    releaseName: traefik-gateway
+    namespace: traefik
+    syncWave: "2"
+  reloader:
+    chartPath: reloader
+    chartRevision: reloader-1.0.1
+    releaseName: reloader
+    namespace: reloader
+    syncWave: "3"
+  rbac:
+    chartPath: rbac
+    chartRevision: rbac-1.0.0
+    releaseName: rbac
+    namespace: kube-system
+    syncWave: "3"
+  rabbitmq:
+    chartPath: rabbitmq
+    chartRevision: rabbitmq-1.2.0
+    releaseName: rabbitmq
+    namespace: rabbitmq
+    syncWave: "3"
+  elasticsearch:
+    chartPath: elasticsearch
+    chartRevision: elasticsearch-1.1.0
+    releaseName: elasticsearch
+    namespace: infrastructure
+    syncWave: "3"
+  keycloak:
+    chartPath: keycloak
+    chartRevision: keycloak-1.1.1
+    releaseName: keycloak
+    namespace: keycloak
+    syncWave: "4"
+  argocd:
+    chartPath: argocd
+    chartRevision: argocd-1.3.0
+    releaseName: argocd
+    namespace: argocd
+    syncWave: "5"
+    prune: false
+    notes: >-
+      Manages the controller performing the sync. The release name and
+      fullnameOverride must equal the OpenTofu helm_release (argocd/argocd),
+      or the handoff stands up a parallel install instead of adopting.
+      prune: false is written here once more in prose, which is exactly what
+      the catalog parser must not mistake for the field.
+  cluster-test:
+    chartPath: cluster-test
+    chartRevision: cluster-test-1.1.0
+    releaseName: cluster-test
+    namespace: cluster-test
+    syncWave: "5"
+  grafana-sso-gateway:
+    chartPath: grafana-sso-gateway
+    chartRevision: grafana-sso-gateway-1.0.2
+    releaseName: grafana-sso-gateway
+    namespace: observability
+    syncWave: "5"
+  observability:
+    chartPath: observability
+    chartRevision: observability-3.4.0
+    releaseName: observability
+    namespace: observability
+    syncWave: "6"
+  log-rules-aks-product-a-prod:
+    chartPath: observability-log-rules
+    chartRevision: observability-log-rules-0.2.0
+    releaseName: log-rules-aks-product-a-prod
+    namespace: observability
+    syncWave: "7"
+  postgres-exporter:
+    chartPath: postgres-exporter
+    chartRevision: postgres-exporter-1.0.0
+    releaseName: postgres-exporter
+    namespace: observability
+    syncWave: "7"
+    notes: >-
+      PENDING: values file present, descriptor absent until the PG `monitoring`
+      role exists. The postgres rules ship dormant for exactly this reason.

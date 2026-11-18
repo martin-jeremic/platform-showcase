@@ -1,0 +1,87 @@
+{{- /*
+Non-secret configuration from the `env:` map in the environment's gitops/services values, injected
+with envFrom ("__" separates .NET configuration sections). The image bakes its defaults in
+config/*.config.json; ONLY the keys written out below can be overridden per environment. To make
+another key overridable, add an explicit line here, in review.
+
+Two rules, both learned the hard way:
+  * explicit keys, never `range .Values.env`: a typo in a values file must not quietly become a new
+    environment variable that nobody reads, and a renamed key must be visible in this file;
+  * hasKey-gated: a key ABSENT from values is absent from the ConfigMap, so the baked default
+    wins. Rendering every key with `| default ""` would blank the baked defaults, because .NET
+    configuration binds the empty string over them. A key PRESENT with "false" is rendered as
+    "false" (hasKey, not `if`), so an explicit off switch is never dropped.
+*/ -}}
+{{- $env := .Values.env }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "payments-backend.fullname" . }}-config
+  labels:
+    {{- include "payments-backend.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  ASPNETCORE_ENVIRONMENT: {{ $env.ASPNETCORE_ENVIRONMENT | default "Production" | quote }}
+  AdminDocuments__Path: {{ $env.AdminDocuments__Path | default "/data/documents" | quote }}
+  {{- if hasKey $env "Api__Name" }}
+  Api__Name: {{ $env.Api__Name | quote }}
+  {{- end }}
+  {{- if hasKey $env "App__UseSwagger" }}
+  App__UseSwagger: {{ $env.App__UseSwagger | toString | quote }}
+  {{- end }}
+  {{- /* Schema changes run as an explicit step, never as a side effect of N replicas starting. */}}
+  {{- if hasKey $env "App__MigrateOnStartup" }}
+  App__MigrateOnStartup: {{ $env.App__MigrateOnStartup | toString | quote }}
+  {{- end }}
+  {{- if hasKey $env "PUBLIC_BASE_URL" }}
+  PUBLIC_BASE_URL: {{ $env.PUBLIC_BASE_URL | quote }}
+  {{- end }}
+  {{- if hasKey $env "Identity__Authority" }}
+  Identity__Authority: {{ $env.Identity__Authority | quote }}
+  {{- end }}
+  {{- if hasKey $env "Identity__ClientId" }}
+  Identity__ClientId: {{ $env.Identity__ClientId | quote }}
+  {{- end }}
+  {{- if hasKey $env "Database__Server" }}
+  Database__Server: {{ $env.Database__Server | quote }}
+  {{- end }}
+  {{- if hasKey $env "Database__Name" }}
+  Database__Name: {{ $env.Database__Name | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__HostName" }}
+  RabbitMq__HostName: {{ $env.RabbitMq__HostName | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__Port" }}
+  RabbitMq__Port: {{ $env.RabbitMq__Port | toString | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__UserName" }}
+  RabbitMq__UserName: {{ $env.RabbitMq__UserName | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__Exchange" }}
+  RabbitMq__Exchange: {{ $env.RabbitMq__Exchange | quote }}
+  {{- end }}
+  {{- if hasKey $env "Provider__BaseUrl" }}
+  Provider__BaseUrl: {{ $env.Provider__BaseUrl | quote }}
+  {{- end }}
+  {{- if hasKey $env "Provider__IsSandbox" }}
+  Provider__IsSandbox: {{ $env.Provider__IsSandbox | toString | quote }}
+  {{- end }}
+  {{- /* Outbound webhooks: off unless the environment says otherwise (see values.yaml). */}}
+  {{- if hasKey $env "WebhookDispatcher__Enabled" }}
+  WebhookDispatcher__Enabled: {{ $env.WebhookDispatcher__Enabled | toString | quote }}
+  {{- end }}
+  {{- if hasKey $env "Reconciliation__Enabled" }}
+  Reconciliation__Enabled: {{ $env.Reconciliation__Enabled | toString | quote }}
+  {{- end }}
+  {{- /*
+  Secrets__ActiveKeyId names the key that encrypts NEW stored secrets (provider client secrets,
+  webhook signing secrets). It is NOT a secret, only a name; the key material arrives from Key
+  Vault as Secrets__Keys__<id>. The image bakes "k1". This override exists so that rotating to k2
+  is a values change (add the k2 object, deploy, flip this), not an image rebuild. payments-email
+  reads the same setting: rotate both together, or the API stores secrets the email service
+  cannot decrypt.
+  */}}
+  {{- if hasKey $env "Secrets__ActiveKeyId" }}
+  Secrets__ActiveKeyId: {{ $env.Secrets__ActiveKeyId | quote }}
+  {{- end }}

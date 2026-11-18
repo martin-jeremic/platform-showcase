@@ -1,0 +1,40 @@
+{{- if .Values.gateway.create -}}
+{{- if .Values.gateway.listeners.websecure.enabled }}
+{{- $_ := required "gateway.listeners.websecure.hostname is required: it must equal certificate.dnsNames, or SNI misses and every route reports NoMatchingParent while the Gateway looks Programmed" .Values.gateway.listeners.websecure.hostname }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ include "platform-traefik.gatewayNamespace" . }}
+  labels:
+    {{- include "platform-traefik.labels" . | nindent 4 }}
+    {{- with .Values.gateway.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.gateway.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ .Values.gatewayClass.name }}
+  listeners:
+    {{- range $key, $l := .Values.gateway.listeners }}
+    {{- if $l.enabled }}
+    - name: {{ default $key $l.name }}
+      protocol: {{ $l.protocol }}
+      port: {{ $l.port }}
+      {{- if $l.hostname }}
+      hostname: {{ $l.hostname | quote }}
+      {{- end }}
+      {{- with $l.tls }}
+      tls:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $l.allowedRoutes }}
+      allowedRoutes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

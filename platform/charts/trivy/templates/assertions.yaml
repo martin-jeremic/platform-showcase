@@ -1,0 +1,19 @@
+{{- /*
+Render-time guard. Renders nothing; fails the render instead of shipping a setting
+that only fails later, at scan time.
+
+Azure workload identity for the scan jobs (AKS clusters whose pods pull with the
+kubelet identity, so a scan job has no pull secret of its own). The scan-pod label
+azure.workload.identity/use=true makes the webhook inject the identity named by
+the ServiceAccount annotation azure.workload.identity/client-id. With the label but
+without that client ID, every private-registry scan fails with UNAUTHORIZED, one
+scan job at a time, and nothing else says why.
+*/}}
+{{- $op := index .Values "trivy-operator" | default dict -}}
+{{- $scanLabels := (index $op "trivyOperator" | default dict).scanJobPodTemplateLabels | default "" -}}
+{{- if contains "azure.workload.identity/use=true" $scanLabels -}}
+{{- $annotations := (index $op "serviceAccount" | default dict).annotations | default dict -}}
+{{- if not (index $annotations "azure.workload.identity/client-id") -}}
+{{- fail "trivy-operator.trivyOperator.scanJobPodTemplateLabels turns on Azure workload identity for the scan jobs, but trivy-operator.serviceAccount.annotations has no azure.workload.identity/client-id (the scanner identity in infra/)." -}}
+{{- end -}}
+{{- end -}}

@@ -1,0 +1,76 @@
+# STANDALONE stack: this cluster does not ship telemetry to the hub. Filesystem
+# Loki on the Retain class (no Storage account), no Tempo (nothing emits OTLP).
+kubePromStack:
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  prometheus:
+    prometheusSpec:
+      externalLabels:
+        cluster: aks-org-prod
+  alertmanager:
+    serviceAccount:
+      annotations:
+        azure.workload.identity/client-id: "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    alertmanagerSpec:
+      podMetadata:
+        labels:
+          azure.workload.identity/use: "true"
+      volumes:
+        - name: alertmanager-kv
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: alertmanager-kv
+      volumeMounts:
+        - name: alertmanager-kv
+          mountPath: /etc/alertmanager/kv
+          readOnly: true
+  grafana:
+    persistence:
+      storageClassName: platform-retain
+      size: 2Gi
+    grafana.ini:
+      server:
+        domain: services.example.com
+        root_url: https://services.example.com/monitoring/grafana
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        access: proxy
+        jsonData:
+          httpHeaderName1: X-Scope-OrgID
+        secureJsonData:
+          httpHeaderValue1: aks-org-prod
+loki:
+  singleBinary:
+    persistence:
+      storageClass: platform-retain
+      size: 20Gi
+alloyPipeline:
+  cluster: aks-org-prod
+  tenant: aks-org-prod
+prometheusRules:
+  files:
+    certificates: true
+    edge: true
+    trivy: true
+notifications:
+  enabled: true
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  graph:
+    clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    sender: alerts@example.com
+    recipients:
+      - platform-team@example.com
+  keyVault:
+    keyvaultName: kv-org-prod
+    authMode: workloadIdentity

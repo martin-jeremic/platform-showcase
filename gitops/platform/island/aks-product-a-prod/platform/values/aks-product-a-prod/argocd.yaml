@@ -1,0 +1,32 @@
+# Release `argocd`, fullnameOverride `argocd`, namespace `argocd`: identical to the
+# OpenTofu helm_release this component adopts.
+route:
+  hostname: app.product-a.example.net
+argo-cd:
+  global:
+    domain: app.product-a.example.net
+  configs:
+    cm:
+      url: "https://app.product-a.example.net/argocd"
+      "oidc.config": |
+        name: Keycloak
+        issuer: https://app.product-a.example.net/keycloak/realms/product-a
+        clientID: argocd
+        clientSecret: $oidc.keycloak.clientSecret
+        requestedScopes: ["openid", "profile", "email", "groups"]
+    rbac:
+      "policy.csv": |
+        g, argocd-admins, role:admin
+        p, role:readonly, logs, get, */*, allow
+  # The repo-server reads Azure DevOps with a federated identity (setup/
+  # repo-creds-azure-devops.yaml). The tofu bootstrap sets the same two keys: drop
+  # them here and the self-adoption sync would strip the identity from the very
+  # component that reads this repo.
+  repoServer:
+    serviceAccount:
+      create: true
+      name: argocd-repo-server
+      annotations:
+        azure.workload.identity/client-id: "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    podLabels:
+      azure.workload.identity/use: "true"

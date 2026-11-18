@@ -1,0 +1,15 @@
+{{- /* Optional Certificates, list-driven. Each entry: { name, namespace, enabled, spec }. */ -}}
+{{- range .Values.certificates }}
+{{- if .enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace | default "default" }}
+  labels:
+    {{- include "platform-cert-manager.labels" $ | nindent 4 }}
+spec:
+  {{- toYaml .spec | nindent 2 }}
+{{- end }}
+{{- end }}

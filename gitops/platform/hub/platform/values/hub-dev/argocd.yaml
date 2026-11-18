@@ -1,0 +1,44 @@
+# Argo CD on the hub, in namespace argocd-hub, managing itself and the spokes.
+route:
+  hostname: dev.example.com
+argo-cd:
+  global:
+    domain: dev.example.com
+  configs:
+    cm:
+      url: "https://dev.example.com/argocd"
+      "oidc.config": |
+        name: Keycloak
+        issuer: https://dev.example.com/keycloak/realms/org-test
+        clientID: argocd
+        clientSecret: $oidc.keycloak.clientSecret
+        requestedScopes: ["openid", "profile", "email", "groups"]
+    rbac:
+      # Platform admins only at the global level. Spoke developers get their
+      # rights from the per-cluster AppProject roles (deny by default).
+      "policy.csv": |
+        g, argocd-admins, role:admin
+        p, role:readonly, logs, get, */*, allow
+  server:
+    replicas: 1
+    pdb:
+      enabled: false
+  # The repo-server reads Azure DevOps with a FEDERATED identity, not a PAT: its
+  # projected token (issuer https://dev.example.com/k8s-issuer, published by the
+  # oidc-issuer chart) is exchanged with Entra for a managed identity that is a
+  # Reader in the ADO projects (setup/repo-creds-azure-devops.yaml). The
+  # federated credential's subject names this ServiceAccount.
+  repoServer:
+    replicas: 1
+    pdb:
+      enabled: false
+    serviceAccount:
+      create: true
+      name: argocd-hub-repo-server
+      annotations:
+        azure.workload.identity/client-id: "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    podLabels:
+      azure.workload.identity/use: "true"
+  # Sharding is by cluster; one controller handles the five clusters today.
+  controller:
+    replicas: 1

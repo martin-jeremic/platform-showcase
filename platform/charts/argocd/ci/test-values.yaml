@@ -1,0 +1,19 @@
+# CI values: the island cluster's shape (platform/values/aks-product-a-prod/argocd.yaml).
+route:
+  hostname: app.product-a.example.net
+argo-cd:
+  global:
+    domain: app.product-a.example.net
+  configs:
+    cm:
+      url: "https://app.product-a.example.net/argocd"
+      "oidc.config": |
+        name: Keycloak
+        issuer: https://app.product-a.example.net/keycloak/realms/product-a
+        clientID: argocd
+        clientSecret: $oidc.keycloak.clientSecret
+        requestedScopes: ["openid", "profile", "email", "groups"]
+    rbac:
+      "policy.csv": |
+        g, argocd-admins, role:admin
+        p, role:readonly, logs, get, */*, allow

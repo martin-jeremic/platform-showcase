@@ -1,0 +1,46 @@
+# TEMPORARY, never committed as imports.tf. Copy to imports.tf for the one adoption
+# apply, then delete it. Methodology: ../../docs/import-methodology.md.
+#
+#   export ARM_SUBSCRIPTION_ID=22222222-2222-2222-2222-222222222222   # rule 10
+#   tofu init && tofu validate
+#   tofu plan -generate-config-out=generated.tf   # cross-check only (rule 4), then delete it
+#   tofu plan        # gate: "N to import, 0 to add, 0 to change, 0 to destroy."
+#   tofu apply
+#   rm imports.tf
+#   tofu plan        # gate: "No changes."
+#   tofu plan -destroy   # must FAIL on prevent_destroy (rule 11)
+#
+# Import IDs are built from VARIABLES via locals: resource attributes do not exist
+# at plan time. Collections import with for_each keyed exactly like the resources.
+
+locals {
+  rg_id = "/subscriptions/${var.subscription_id}/resourceGroups/${var.resource_group_name}"
+
+  # Role assignment IDs are the one thing that cannot be derived: read them once with
+  #   az role assignment list --scope <registry id> --query "[].{name:name, principal:principalId, role:roleDefinitionName}"
+  # and key them exactly like local.role_assignments in rbac.tf.
+  role_assignment_ids = {
+    "release-manager@example.com|AcrPush|orgacr"            = "aaaaaaaa-0000-0000-0000-000000000000"
+    "77777777-7777-7777-7777-777777777777|AcrPush|orgacr"    = "bbbbbbbb-0000-0000-0000-000000000000"
+    "88888888-8888-8888-8888-888888888888|AcrPush|productacr" = "cccccccc-0000-0000-0000-000000000000"
+    "99999999-9999-9999-9999-999999999999|AcrPull|orgacr"    = "dddddddd-0000-0000-0000-000000000000"
+    "99999999-9999-9999-9999-999999999999|Reader|orgacr"     = "eeeeeeee-0000-0000-0000-000000000000"
+  }
+}
+
+import {
+  to = azurerm_resource_group.rg
+  id = local.rg_id
+}
+
+import {
+  for_each = var.registries
+  to       = azurerm_container_registry.acr[each.key]
+  id       = "${local.rg_id}/providers/Microsoft.ContainerRegistry/registries/${each.key}"
+}
+
+import {
+  for_each = local.role_assignment_ids
+  to       = azurerm_role_assignment.grant[each.key]
+  id       = "${local.rg_id}/providers/Microsoft.ContainerRegistry/registries/${split("|", each.key)[2]}/providers/Microsoft.Authorization/roleAssignments/${each.value}"
+}

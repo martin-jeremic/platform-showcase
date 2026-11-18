@@ -1,0 +1,42 @@
+# payments-api pull-request gate into main. Register as `payments-api-pr`.
+#
+# Run by a build-validation branch policy whose path filters mirror CI.yml's (the YAML `pr:` block
+# is ignored for Azure Repos). The policies are created from a manifest by
+# platform/ci-templates/scripts/ado/set-branch-policies.sh; this repository's old pipelines/scripts/ copies
+# of the ADO bootstrap scripts are gone in favour of those shared, idempotent versions.
+#
+#   ConventionChecks  merge markers, required files, pinned gitleaks (blocking)
+#   Build             locked restore, build, tests, and the EF Core guard: the PR fails if the model
+#                     changed without a migration. This service migrates at deploy time, so a
+#                     missing migration would otherwise surface as a runtime error in dev.
+#   HelmValidate      helm lint + template with every ci/*.yaml, and the no-`range` rule
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  - template: stages/convention-checks-stage.yml@templates
+
+  - template: stages/pr-dotnet-stage.yml@templates
+    parameters:
+      dependsOn: []
+      solution: Payments.slnx
+      suites:
+        - tests/Payments.Tests/Payments.Tests.csproj
+      efGuards:
+        - project: src/Api/Payments.Api.csproj
+          startupProject: src/Api/Payments.Api.csproj
+          context: PaymentsDbContext
+      dockerfile: src/Api/Dockerfile
+
+  - template: stages/pr-helm-stage.yml@templates
+    parameters:
+      dependsOn: []
+      charts:
+        - helm/payments-api

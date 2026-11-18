@@ -1,0 +1,31 @@
+# GitVersion, Mainline. One file per deployable in the real monorepo (each service versions
+# independently); one shown. The stage template versioning-gitversion.yml reads it and exposes
+# nextVersion / isReleaseReady to the rest of the pipeline.
+next-version: 1.0.0
+strategies:
+  - ConfiguredNextVersion
+  - Mainline
+
+# Conventional-commit prefixes decide the bump; a "skip"/"no-bump" commit releases nothing.
+major-version-bump-message: '^(breaking|BREAKING CHANGE|feat!).*'
+minor-version-bump-message: '^feat.*'
+patch-version-bump-message: '^(fix|chore|refactor|perf|style|test|docs|build|ci).*'
+no-bump-message: '^(skip|no-bump).*'
+
+commit-message-incrementing: Enabled
+
+branches:
+  # main: release versions (1.4.2). Images are NOT rebuilt here; main promotes the digest develop built.
+  main:
+    regex: ^main$
+    label: ''
+    increment: Patch
+    track-merge-target: false
+    is-release-branch: true
+
+  # develop: pre-release versions (1.5.0-alpha.7). This is where images are built.
+  develop:
+    regex: ^develop$
+    label: alpha
+    increment: Minor
+    track-merge-target: true

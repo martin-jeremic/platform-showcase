@@ -1,0 +1,175 @@
+# stages/migration-deploy-stage.yml
+#
+# Push-based (dev) schema migration: `helm upgrade --install` of the migration Job chart (e.g.
+# product-a-db), from the EXACT image digest the application deploy is about to roll. The app
+# deploy stage depends on this one, which keeps "schema before code" as an explicit pipeline
+# ordering on dev. (In the GitOps environments the Job chart is its own Argo Application with
+# selfHeal off; see gitops/apps.)
+#
+# Why the Job is its own chart and release, not a pre-upgrade hook of the app chart: a failing
+# hook blocked the app release, including the very build that would have fixed a DATA-level
+# migration failure. As a separate release it can be skipped for one run (runMigrations: false)
+# without editing anything.
+#
+# Three guards:
+#   - the digest is REQUIRED. "Refusing to run a migration by tag alone": a tag can move between
+#     the lookup and the pull, and DDL from an unknown build is not something to find out later.
+#   - `--wait --wait-for-jobs`. Without --wait-for-jobs Helm 4 does not wait for Jobs at all: one
+#     run reported "deployed" a second after creating a Job that failed nine seconds later. With
+#     it, Helm returns once the Job is Complete and fails as soon as it is Failed.
+#   - the timeout is sized for the Job's activeDeadlineSeconds plus CSI mount and image pull.
+#
+# Every run gets a NEW Job (runNonce = Build.BuildId): "run it again" is a new name, never a
+# mutation of an existing Job, so a re-run with the same digest still migrates.
+#
+# Chart contract: values image.repository / image.digest, migrationJob.enabled / .runNonce; the
+# Job carries the label example.com/job-kind=schema-migration and the annotation
+# example.com/run-nonce=<runNonce> (used below to find THIS run's Job).
+#
+# The agent's kubeconfig points at the dev cluster (deploy agents carry a `dev-deploy`
+# capability); the registry is reached through the ARM service connection.
+
+parameters:
+  - name: stageName
+    type: string
+    default: Migrate_Dev
+  - name: dependsOn
+    type: object
+    default: []
+  - name: condition
+    type: string
+    default: succeeded()
+  - name: environmentName
+    type: string
+    default: Development
+  - name: namespace
+    type: string
+  # The Job chart (OCI name) and its release name.
+  - name: chartName
+    type: string
+  - name: releaseName
+    type: string
+    default: ''
+  # The image the Job runs (the API image) and the version = chart version = image tag.
+  - name: imageName
+    type: string
+  - name: version
+    type: string
+  - name: valuesFile
+    type: string
+    default: ''
+  - name: runMigrations
+    type: boolean
+    default: true
+  - name: helmTimeout
+    type: string
+    default: 25m
+  - name: acrName
+    type: string
+    default: productacr
+  - name: armServiceConnection
+    type: string
+    default: arm-product-a
+  - name: helmVersion
+    type: string
+    default: '4.2.0'
+  - name: pool
+    type: object
+    default:
+      name: Default
+      demands: [dev-deploy]
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Migrate database (${{ parameters.environmentName }})
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    jobs:
+      - deployment: Migrate
+        displayName: helm upgrade ${{ coalesce(parameters.releaseName, parameters.chartName) }}
+        environment: ${{ parameters.environmentName }}
+        pool: ${{ parameters.pool }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+
+                - task: HelmInstaller@1
+                  displayName: Install Helm ${{ parameters.helmVersion }}
+                  inputs:
+                    helmVersionToInstall: ${{ parameters.helmVersion }}
+
+                - task: AzureCLI@2
+                  displayName: Resolve digest + run the migration Job
+                  env:
+                    ACR_NAME: ${{ parameters.acrName }}
+                    IMAGE: ${{ parameters.imageName }}
+                    VERSION: ${{ parameters.version }}
+                    CHART: ${{ parameters.chartName }}
+                    RELEASE: ${{ coalesce(parameters.releaseName, parameters.chartName) }}
+                    NAMESPACE: ${{ parameters.namespace }}
+                    VALUES_FILE: ${{ parameters.valuesFile }}
+                    RUN_MIGRATIONS: ${{ parameters.runMigrations }}
+                    HELM_TIMEOUT: ${{ parameters.helmTimeout }}
+                    RUN_NONCE: $(Build.BuildId)
+                  inputs:
+                    azureSubscription: ${{ parameters.armServiceConnection }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]No version. Re-run with the version to deploy."; exit 1; }
+                      REGISTRY="$ACR_NAME.azurecr.io"
+
+                      DIGEST="$(az acr repository show --name "$ACR_NAME" --image "$IMAGE:$VERSION" --query digest -o tsv 2>/dev/null || true)"
+                      if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                        echo "##vso[task.logissue type=error]Could not resolve a digest for $IMAGE:$VERSION; refusing to run a migration by tag alone."
+                        exit 1
+                      fi
+                      echo "Migrating with $IMAGE@$DIGEST"
+
+                      az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv \
+                        | helm registry login "$REGISTRY" --username 00000000-0000-0000-0000-000000000000 --password-stdin
+
+                      ENABLED=true
+                      if [ "${RUN_MIGRATIONS,,}" != "true" ]; then
+                        ENABLED=false
+                        echo "##vso[task.logissue type=warning]runMigrations=false: the migration Job is DISABLED for this run only. The parameter default re-enables it next run."
+                      fi
+
+                      ARGS=(--namespace "$NAMESPACE" --create-namespace
+                            --version "$VERSION"
+                            --set-string "image.repository=$REGISTRY/$IMAGE"
+                            --set-string "image.digest=$DIGEST"
+                            --set "migrationJob.enabled=$ENABLED"
+                            --set-string "migrationJob.runNonce=$RUN_NONCE"
+                            --wait --wait-for-jobs --timeout "$HELM_TIMEOUT")
+                      [ -z "$VALUES_FILE" ] || ARGS+=(--values "$BUILD_SOURCESDIRECTORY/$VALUES_FILE")
+                      helm upgrade --install "$RELEASE" "oci://$REGISTRY/helm/$CHART" "${ARGS[@]}"
+
+                # Reports only (the step above is the gate). Selects THIS run's Job by its run-nonce
+                # annotation and prints its logs whether the step above passed or failed. For a Job
+                # that did not succeed it also describes the Job and its pods: a container that
+                # never started (FailedMount, CreateContainerConfigError, ImagePullBackOff) has no
+                # logs, only events.
+                - bash: |
+                    set -uo pipefail
+                    JOB="$(kubectl get jobs -n "$NAMESPACE" -l example.com/job-kind=schema-migration \
+                      -o jsonpath="{range .items[?(@.metadata.annotations.example\.com/run-nonce==\"$RUN_NONCE\")]}{.metadata.name}{end}")"
+                    if [ -z "$JOB" ]; then
+                      echo "No migration Job for run $RUN_NONCE (disabled for this run, or the step above failed before creating it)."
+                      exit 0
+                    fi
+                    kubectl get job "$JOB" -n "$NAMESPACE" -o wide
+                    kubectl logs -n "$NAMESPACE" "job/$JOB" --all-containers --timestamps || true
+                    if [ "$(kubectl get job "$JOB" -n "$NAMESPACE" -o jsonpath='{.status.succeeded}')" != "1" ]; then
+                      kubectl describe job "$JOB" -n "$NAMESPACE"
+                      kubectl describe pods -n "$NAMESPACE" -l "job-name=$JOB"
+                    fi
+                  displayName: Migration Job logs
+                  condition: always()
+                  env:
+                    NAMESPACE: ${{ parameters.namespace }}
+                    RUN_NONCE: $(Build.BuildId)

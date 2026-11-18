@@ -1,0 +1,20 @@
+# Lint/template values: the shape of gitops/services apps/access-api/services/. The digest is
+# sha256("ci"), not a real image.
+image:
+  tag: "0.1.0"
+  digest: sha256:1b158839f8aa339e89bb50b1603e90ec68e0fd5565fe10a7cb32729fddf7070a
+env:
+  Identity__Authority: https://services.example.com/keycloak/realms/org
+  App__MigrateOnStartup: "false"
+  ExcludedClientNames: [account, admin-cli]
+azureKeyVault:
+  keyvaultName: kv-org-prod
+  tenantId: 11111111-1111-1111-1111-111111111111
+  kubeletClientId: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+route:
+  enabled: true
+  hostnames:
+    - services.example.com
+verticalPodAutoscaler:
+  enabled: true
+  updateMode: Initial

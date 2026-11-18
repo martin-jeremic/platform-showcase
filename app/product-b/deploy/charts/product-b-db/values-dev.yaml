@@ -1,0 +1,4 @@
+# Dev values (push-based). The CD pipeline sets image.digest, migrationJob.enabled/mode/runNonce.
+# The refuse-placeholders stage checks this file for <<MARKER>> placeholders before deploying.
+migrationJob:
+  activeDeadlineSeconds: 1200

@@ -1,0 +1,51 @@
+{{- /*
+Deploy-time seed: one PLAIN Job per dataset running `load <dataset> --if-empty`.
+
+WHY NOT A HELM HOOK (read before reverting)
+  post-install fires once, on the very first install, so a dataset added to an installed release
+  never got a deploy-time seed. post-upgrade fires on every deploy, but a hook is a BLOCKING step:
+  Helm and Argo's PostSync wait for it and treat its failure as a failed release, so one dataset's
+  flaky external source would fail every deploy. A Job without a hook annotation is an ordinary
+  release resource: created with the sync, not waited on, and its failure marks only that Job.
+
+WHO DECIDES "ALREADY SEEDED": THE DATA, NOT THE JOB OBJECT
+  An earlier version gave this Job a stable name and treated the Job's existence as the record that
+  the dataset was seeded. Two things broke it. A Job's pod template is IMMUTABLE and carries the
+  image digest, which changes every deploy, so the next deploy failed with "field is immutable".
+  And the object was never a durable record: ttlSecondsAfterFinished deleted it a week later and
+  the next deploy ran the full load again.
+  So instead:
+    * the name ends in the first 8 hex of a sha256 over the Job's own rendered spec. Anything
+      Kubernetes would refuse as an in-place update (image, env, args) yields a NEW name; the old
+      Job is no longer rendered, so Helm deletes it / Argo prunes it. Nothing is patched in place.
+    * `--if-empty` makes the app check the dataset for active rows and exit 0 without fetching when
+      there are any. A load commits in one transaction, so "has rows" means "completely loaded".
+  Net effect: every deploy runs a seconds-long presence check per dataset; only a new dataset, a
+  fresh environment or a restored database actually goes to the external source.
+
+Name length: the base is cut to 54 chars so "-" + 8 hash chars stays within 63; the Job name is
+copied into its pods' job-name label, which has the same limit.
+
+Per-dataset opt-out: `seedOnDeploy: false` on the dataset entry (a disabled dataset is never
+seeded). Tested with hasKey, because Sprig's `default` treats an explicit false as empty.
+*/ -}}
+{{- if .Values.seedOnDeploy.enabled }}
+{{- $root := . -}}
+{{- range $name, $ds := .Values.datasets }}
+{{- if and $ds.enabled (or (not (hasKey $ds "seedOnDeploy")) $ds.seedOnDeploy) }}
+{{- $spec := include "refdata.jobSpec" (dict "root" $root "args" (list "load" $name "--if-empty")) }}
+{{- $base := printf "%s-seed-%s" (include "refdata.fullname" $root) (include "refdata.dnsName" $name) | trunc 54 | trimSuffix "-" }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $base }}-{{ $spec | sha256sum | trunc 8 }}
+  labels:
+    {{- include "refdata.labels" $root | nindent 4 }}
+    example.com/dataset: {{ $name | quote }}
+    example.com/job-kind: seed
+spec:
+  {{- $spec | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}

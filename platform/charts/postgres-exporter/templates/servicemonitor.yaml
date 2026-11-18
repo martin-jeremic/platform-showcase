@@ -1,0 +1,30 @@
+{{- /*
+Prometheus scrape of the exporter.
+
+jobLabel is deliberately left unset, so the job label becomes the Service name,
+postgres-exporter. The Data/PostgreSQL dashboard applies no job filter,
+so this only has to be stable.
+
+Note what the resulting series describe: an EXTERNAL server. The instance label
+is this pod, not the database — pg_stat_database's own `datname` label is what
+distinguishes databases, and it is what the dashboard's variable reads.
+*/ -}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "postgres-exporter.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-exporter.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "postgres-exporter.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      {{- with .Values.metrics.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+{{- end }}

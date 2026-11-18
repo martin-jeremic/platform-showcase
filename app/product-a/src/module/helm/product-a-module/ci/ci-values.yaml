@@ -1,0 +1,31 @@
+# Lint/template values: the shape of gitops/apps/apps/product-a-module/<env>/. The digest is
+# sha256("ci"), not a real image.
+image:
+  digest: sha256:1b158839f8aa339e89bb50b1603e90ec68e0fd5565fe10a7cb32729fddf7070a
+workloadIdentity:
+  enabled: true
+  clientId: 55555555-5555-5555-5555-555555555555
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-stage
+  tenantId: 11111111-1111-1111-1111-111111111111
+gateway:
+  enabled: true
+route:
+  enabled: true
+  hostnames:
+    - stage.product-a.example.net
+config:
+  environment: Stage
+  llmDeployment: llm-product-a
+  llmBaseUrl: https://foundry-product-a.example.net/openai/v1
+  apiBaseUrl: http://product-a-api
+  m2m:
+    tokenUrl: https://dev.example.com/keycloak/realms/product-a-stage/protocol/openid-connect/token
+    clientId: product-a-module
+  promptGovernance:
+    baseUrl: http://product-a-api
+  capacity:
+    llmMaxInflightPerPod: "12"
+  tuning:
+    gunicornMaxRequests: "200"

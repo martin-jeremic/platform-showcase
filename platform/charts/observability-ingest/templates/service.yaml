@@ -1,0 +1,36 @@
+{{- if ne .Values.service.type "ClusterIP" }}
+# External exposure of the OTLP ports only (the alloy subchart already provides
+# a ClusterIP service for in-cluster use). NodePort on this hub (no LoadBalancer);
+# an external proxy TCP-forwards the OTLP port to this NodePort. Backends private.
+apiVersion: v1
+kind: Service
+metadata:
+  name: observability-ingest-otlp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: otlp-grpc
+      port: {{ .Values.otlp.grpcPort }}
+      targetPort: {{ .Values.otlp.grpcPort }}
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePorts.grpc }}
+      nodePort: {{ .Values.service.nodePorts.grpc }}
+      {{- end }}
+    - name: otlp-http
+      port: {{ .Values.otlp.httpPort }}
+      targetPort: {{ .Values.otlp.httpPort }}
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePorts.http }}
+      nodePort: {{ .Values.service.nodePorts.http }}
+      {{- end }}
+{{- end }}

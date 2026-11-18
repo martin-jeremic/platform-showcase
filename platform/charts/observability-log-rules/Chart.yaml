@@ -1,0 +1,21 @@
+apiVersion: v2
+name: observability-log-rules
+description: >
+  LogQL alert rules for ONE Loki tenant, evaluated by the Loki ruler of the
+  observability release in the same namespace and sent to its Alertmanager. One
+  release per tenant: the fan-out is one Argo descriptor per tenant
+  (platform/<cluster>/log-rules-<tenant>.yaml), not a loop in a template.
+type: application
+version: 0.2.0
+appVersion: "1.0"
+keywords:
+  - loki
+  - alerting
+  - logs
+# 0.2.0 -- log-rules/ingest-rate.yaml, switched by rules.ingestRate (default
+#   false): PlatformInboundRateHigh, drawn as a threshold line on the
+#   "Product A / Ingest rate" dashboard.
+# 0.1.0 -- first rules, for tenants whose logs follow the application log contract
+#   (`level` label; http_status / exception_type structured metadata -- parsed by
+#   observability-ingest for the hub's spokes, by the observability chart's own
+#   Alloy with alloyPipeline.parseLogContract elsewhere).

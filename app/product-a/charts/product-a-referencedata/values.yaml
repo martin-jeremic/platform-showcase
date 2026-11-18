@@ -1,0 +1,106 @@
+# product-a-referencedata: loads public reference datasets (countries, currencies, locations,
+# commodity codes, ...) into the shared reference schema. Reference data changes over days to
+# years, so SCHEDULING is one Kubernetes CronJob per dataset running `load <dataset>`; no
+# long-running pod keeps time.
+#
+# One long-running pod does exist: the command consumer (templates/deployment.yaml). It consumes
+# the portal's "refresh from source" command and runs the same load. Its in-process scheduler is
+# switched OFF, so the CronJobs stay the single owner of scheduling.
+
+fullnameOverride: ""
+
+image:
+  repository: productacr.azurecr.io/product-a-referencedata
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Vault objects: product-a-referencedata--database (the WRITER connection to the reference schema;
+# this loader is its only writer) and product-a-referencedata--broker-password.
+azureKeyVault:
+  enabled: false
+  keyvaultName: ""
+  tenantId: ""
+  secretProviderClassName: product-a-referencedata-kv
+  syncedSecretName: product-a-referencedata-secrets
+
+# Resources of every load Job (CronJob runs and seed Jobs).
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+otel:
+  enabled: false
+  endpoint: ""
+
+# Non-secret settings, explicit keys (templates/configmap.yaml).
+config:
+  environment: ""        # REQUIRED
+  logLevel: Information
+  broker:                # REQUIRED; the password is a vault object
+    host: ""
+    port: "5672"
+    virtualHost: "/"
+    username: ""
+  # Exchange the loader publishes "dataset updated" events to.
+  updatedEventExchange: reference-data
+
+# One CronJob per dataset. A map, keyed by dataset name (the CLI verb's argument):
+#   countries:
+#     enabled: true              false = no CronJob and no seed Job, the dataset is ignored
+#     schedule: "15 7 * * 1"     cron, UTC
+#     suspend: false             freeze the CronJob without deleting it
+#     seedOnDeploy: false        skip the deploy-time seed only (absent = seeded)
+# Empty by default: a defaults-only render creates nothing.
+datasets: {}
+
+cronDefaults:
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+
+# JobSpec fields, rendered INSIDE jobTemplate.spec (and the seed Jobs) by refdata.jobSpec.
+jobDefaults:
+  ttlSecondsAfterFinished: 604800
+  backoffLimit: 2
+  # The largest feeds take a while; generous, but a hung download still ends.
+  activeDeadlineSeconds: 3600
+
+# Deploy-time seed (templates/seed-job.yaml): every deploy runs `load <dataset> --if-empty` per
+# dataset, so a newly added dataset does not wait for its CronJob's first tick (up to a year for a
+# yearly feed).
+seedOnDeploy:
+  enabled: true
+
+commandConsumer:
+  enabled: true
+  # The largest dataset holds a full archive plus ~100k rows in memory during a load.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+nodeSelector: {}
+tolerations: []

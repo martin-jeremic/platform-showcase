@@ -1,0 +1,183 @@
+{{- include "elasticsearch.validate" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "elasticsearch.fullname" . }}
+  labels:
+    {{- include "elasticsearch.labels" . | nindent 4 }}
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    # On the WORKLOAD, where Reloader reads it. The forked chart put
+    # reloader.stakater.com/match on the POD TEMPLATE, where Reloader never looks --
+    # and `match` does nothing without a paired `search` annotation on the Secret
+    # anyway. So a rotated vault password was never picked up until an unrelated
+    # restart, which then broke authentication at a random later time.
+    reloader.stakater.com/auto: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "elasticsearch.selectorLabels" . | nindent 6 }}
+  serviceName: {{ include "elasticsearch.fullname" . }}-headless
+  template:
+    metadata:
+      labels:
+        {{- include "elasticsearch.selectorLabels" . | nindent 8 }}
+        {{- if and .Values.azureKeyVault.enabled (eq .Values.azureKeyVault.authMode "workloadIdentity") }}
+        # Required for Azure Workload Identity: without it the mutating webhook
+        # never injects the projected SA token and the CSI mount fails.
+        azure.workload.identity/use: "true"
+        {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "elasticsearch.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      initContainers:
+        - name: fix-permissions
+          image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+          imagePullPolicy: {{ .Values.initImage.pullPolicy }}
+          command: ["sh", "-c", "chown -R 1000:1000 /usr/share/elasticsearch/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+        - name: increase-vm-max-map
+          image: "{{ .Values.initImage.repository }}:{{ .Values.initImage.tag }}"
+          imagePullPolicy: {{ .Values.initImage.pullPolicy }}
+          command: ["sysctl", "-w", "vm.max_map_count=262144"]
+          securityContext:
+            privileged: true
+      containers:
+        - name: elasticsearch
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+            - name: transport
+              containerPort: {{ .Values.service.transportPort }}
+          env:
+            - name: cluster.name
+              value: {{ .Values.clusterName | quote }}
+            - name: discovery.type
+              value: single-node
+            - name: ES_JAVA_OPTS
+              value: {{ .Values.esJavaOpts | quote }}
+            {{- if .Values.security.enabled }}
+            # Authentication ON. The chart this was forked from hardcoded
+            # xpack.security.enabled=false, i.e. no authentication at all — every
+            # index readable and writable by anything that could reach port 9200,
+            # including cluster-admin-equivalent operations. That was survivable
+            # only because nothing was supposed to reach it; it was also exposed
+            # through an HTTPRoute on a host that was not a SAN on the gateway
+            # certificate (finding L6), so the one protection it had was a
+            # certificate error.
+            - name: xpack.security.enabled
+              value: "true"
+            # HTTP TLS off deliberately: this service is cluster-internal only
+            # (no HTTPRoute is rendered by this chart at all), and terminating TLS
+            # here would mean managing a second certificate chain for traffic that
+            # never leaves the cluster. Basic auth over the pod network is the
+            # trade being made, and it is a strict improvement on no auth.
+            - name: xpack.security.http.ssl.enabled
+              value: "false"
+            # Bootstrap password for the built-in `elastic` superuser, from Key
+            # Vault via the CSI-synced Secret. Never from a values file.
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "elasticsearch.secretName" . }}
+                  key: {{ include "elasticsearch.passwordKey" . }}
+            {{- else }}
+            - name: xpack.security.enabled
+              value: "false"
+            {{- end }}
+            {{- range $key, $val := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+            {{- if .Values.azureKeyVault.enabled }}
+            # The mount is what makes the CSI driver materialise and rotate the
+            # synced Secret — it only does so WHILE a pod mounts the SPC volume.
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            {{- if .Values.security.enabled }}
+            # exec, not httpGet. With security on an unauthenticated request gets
+            # 401 and the pod would never become Ready — but putting a probe
+            # password in values.yaml would reintroduce exactly the plaintext-
+            # credential problem this platform is built to avoid. exec reads
+            # $ELASTIC_PASSWORD from the CSI-synced Secret, so the credential
+            # never exists outside Key Vault and the pod's own environment.
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  curl -sf -u "elastic:$ELASTIC_PASSWORD"
+                  http://127.0.0.1:{{ .Values.service.httpPort }}/_cluster/health
+            {{- else }}
+            httpGet:
+              path: /_cluster/health
+              port: http
+            {{- end }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            {{- if .Values.security.enabled }}
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  curl -sf -u "elastic:$ELASTIC_PASSWORD"
+                  http://127.0.0.1:{{ .Values.service.httpPort }}/_cluster/health
+            {{- else }}
+            httpGet:
+              path: /_cluster/health
+              port: http
+            {{- end }}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "elasticsearch.fullname" . }}
+        {{- if .Values.azureKeyVault.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.azureKeyVault.secretProviderClassName }}
+            {{- if eq .Values.azureKeyVault.authMode "servicePrincipal" }}
+            # servicePrincipal ONLY; under any other mode it would make the driver
+            # prefer the static credential and silently ignore the identity.
+            nodePublishSecretRef:
+              name: {{ .Values.azureKeyVault.credentialsSecretName | default "secrets-store-creds" }}
+            {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

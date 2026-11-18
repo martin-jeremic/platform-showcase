@@ -1,0 +1,105 @@
+# product-b nightly verification. Register as `product-b-nightly`.
+#
+# Everything that is NOT a pull-request or image-build check: the suites here need the compose stack
+# (PostgreSQL and the rest of deploy/docker-compose.dev.yml) or are too heavy for the shared build
+# machine to run on every change. It runs every night, can be queued by hand, and BLOCKS NOTHING:
+# no pull request, no image build, no deploy. A red nightly is read the next morning.
+#
+#   Architecture  the code's own rules, as tests: domain and platform never reference the agent
+#                 layer, the core never touches the ambient culture or the system clock, and so on.
+#                 About 8 minutes and 6 GB of memory per run; this is the only place it runs.
+#   Integration   the integration suite against the compose stack's PostgreSQL.
+#
+# They run one after the other because the build agents are one machine, and the second runs whether
+# the first passed or not (succeededOrFailed): one red suite must not hide the state of the other.
+#
+# A schedule defined in the pipeline's UI settings OVERRIDES this YAML schedule. Keep the UI empty.
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: '0 2 * * *'
+    displayName: Nightly verification
+    branches:
+      include:
+        - develop
+        - main
+    # Run even when nothing changed: the point is to catch drift outside the code (base images,
+    # package feeds, the shared agent).
+    always: true
+
+pool:
+  name: Default
+
+variables:
+  buildConfiguration: Release
+  DOTNET_NOLOGO: true
+
+stages:
+  - stage: Architecture
+    displayName: Architecture suite
+    dependsOn: []
+    jobs:
+      - job: Architecture
+        timeoutInMinutes: 30
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            displayName: .NET SDK pinned by global.json
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+          - script: dotnet restore ProductB.sln --locked-mode
+            displayName: Restore (locked)
+          - script: dotnet build ProductB.sln --configuration $(buildConfiguration) --no-restore
+            displayName: Build
+          - script: >-
+              dotnet test tests/ProductB.Architecture.Tests --configuration $(buildConfiguration) --no-build
+              --logger trx --results-directory "$(Agent.TempDirectory)/TestResults"
+            displayName: Architecture tests
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: '$(Agent.TempDirectory)/TestResults/**/*.trx'
+              failTaskOnFailedTests: true
+
+  - stage: Integration
+    displayName: Integration suite (compose stack)
+    # After Architecture only so the two heavy runs do not share the one build machine.
+    dependsOn: Architecture
+    condition: succeededOrFailed()
+    jobs:
+      - job: Integration
+        timeoutInMinutes: 45
+        steps:
+          - checkout: self
+          - task: UseDotNet@2
+            displayName: .NET SDK pinned by global.json
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+          # Dev-only placeholder credentials come from the compose file's ${VAR:-default}s; nothing
+          # here is a real secret.
+          - script: docker compose -f deploy/docker-compose.dev.yml up -d --wait
+            displayName: Start the dependencies
+          - script: dotnet restore ProductB.sln --locked-mode
+            displayName: Restore (locked)
+          - script: dotnet build ProductB.sln --configuration $(buildConfiguration) --no-restore
+            displayName: Build
+          - script: >-
+              dotnet test tests/ProductB.Integration.Tests --configuration $(buildConfiguration) --no-build
+              --logger trx --results-directory "$(Agent.TempDirectory)/TestResults"
+            displayName: Integration tests
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: '$(Agent.TempDirectory)/TestResults/**/*.trx'
+              failTaskOnFailedTests: true
+          - script: docker compose -f deploy/docker-compose.dev.yml down -v
+            displayName: Tear down
+            condition: always()

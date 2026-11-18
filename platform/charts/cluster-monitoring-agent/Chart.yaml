@@ -1,0 +1,45 @@
+apiVersion: v2
+name: cluster-monitoring-agent
+description: >
+  Spoke-cluster monitoring agent. Installs Grafana Alloy (unified collector),
+  node-exporter and kube-state-metrics, and ships metrics, logs and traces to the
+  central observability hub through ONE OTLP endpoint secured with mutual TLS (the
+  observability-ingest gateway). The client certificate is the cluster's identity;
+  it comes from Azure Key Vault over the Secrets Store CSI driver. Every signal is
+  stamped with a `cluster` label so one central Grafana shows every cluster.
+type: application
+version: 0.5.0
+appVersion: "1.0.0"
+keywords:
+  - monitoring
+  - grafana-alloy
+  - node-exporter
+  - kube-state-metrics
+  - mtls
+  - multi-cluster
+# 0.5.0 -- mtls.source `inline` (a Secret rendered from --set-file values) is
+#   removed; `existingSecret` replaces it for push-installs. keyVault defaults to
+#   workload identity. Log discovery is filtered to the node the pod runs on.
+#   Every pod gets the production-floor priority tiers.
+# 0.4.0 -- metrics.trivy: a static-target scrape of the trivy release so its
+#   trivy_* report counts reach the hub with the scanned workload's own
+#   `namespace` label.
+# 0.2.0 -- renderable from git: mtls.source keyVault mounts the bundle straight
+#   into Alloy over the CSI driver; values.yaml names no cluster any more.
+#
+# Subcharts pinned EXACTLY (were ranges ^1.0.0 / ^4.0.0 / ^5.0.0): a range let
+# `helm dependency update` pick whatever was newest that day, and ^5.0.0 silently
+# capped kube-state-metrics at 5.x.
+dependencies:
+  - name: alloy
+    version: "1.14.4"
+    repository: https://grafana.github.io/helm-charts
+    condition: alloy.enabled
+  - name: prometheus-node-exporter
+    version: "4.60.1"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: nodeExporter.enabled
+  - name: kube-state-metrics
+    version: "8.7.1"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kubeStateMetrics.enabled

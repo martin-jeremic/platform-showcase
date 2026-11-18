@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'rbac' to 'aks-org-prod'.
+chartPath:     rbac
+chartRevision: rbac-1.0.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   rbac
+namespace:     kube-system
+syncWave:      "3"

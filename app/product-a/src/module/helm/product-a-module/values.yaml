@@ -1,0 +1,113 @@
+# product-a-module: structural defaults. Per-environment values live in gitops/apps
+# (apps/product-a-module/<env>/). Keys marked REQUIRED have no default on purpose.
+
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  repository: productacr.azurecr.io/product-a-module
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Empty on AKS (kubelet identity pulls); the on-prem spoke names its namespace pull secret here.
+imagePullSecrets: []
+
+serviceAccount:
+  automount: false
+
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  port: 80
+  targetPort: 8000
+
+# gunicorn's graceful_timeout is 600 s (an analysis may run for minutes); the pod gets the same
+# grace plus a margin, or the kubelet would SIGKILL the analysis gunicorn is still waiting for.
+terminationGracePeriodSeconds: 620
+
+# Python cold start (imports, model clients) is slow and uneven: the startup probe allows 150 s,
+# and liveness only starts counting after it succeeds, so a slow start is never killed as hung.
+startupProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 5
+  failureThreshold: 30
+readinessProbe:
+  enabled: true
+  path: /health/ready
+  periodSeconds: 15
+  failureThreshold: 3
+livenessProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 30
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    memory: 768Mi
+
+otel:
+  enabled: false
+  endpoint: ""
+
+gateway:
+  enabled: false
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: false
+  hostnames: []
+  path: /module
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+# Non-sensitive config, rendered key by key into the ConfigMap (templates/configmap.yaml) and
+# injected with envFrom.
+config:
+  environment: ""        # REQUIRED
+  logLevel: INFO
+  llmDeployment: ""      # REQUIRED, e.g. llm-product-a
+  llmBaseUrl: ""         # REQUIRED, the OpenAI-compatible v1 surface of foundry-product-a
+  apiBaseUrl: ""         # REQUIRED: tools (MCP) and prompt governance live on product-a-api
+  m2m:                   # client-credentials token for calls to the API; the secret is in the vault
+    tokenUrl: ""         # REQUIRED
+    clientId: ""         # REQUIRED
+  promptGovernance:
+    # Fail-closed: with this on, a pipeline step whose prompt has no approved version raises
+    # instead of falling back to a vendored copy.
+    enabled: true
+    baseUrl: ""
+  # Tuning knobs. "" = key omitted, the code's documented default applies (see configmap.yaml).
+  capacity:
+    llmMaxInflightPerPod: ""
+    batchEnrichmentEnabled: ""
+  # Read by the shared gunicorn config and glibc; "" keeps the image's ENV default.
+  tuning:
+    gunicornMaxRequests: ""
+    mallocArenaMax: ""
+
+azureKeyVault:
+  enabled: false
+  keyvaultName: ""
+  tenantId: ""
+  secretProviderClassName: product-a-module-kv
+  syncedSecretName: product-a-module-secrets

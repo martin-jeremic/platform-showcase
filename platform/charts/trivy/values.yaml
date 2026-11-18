@@ -1,0 +1,80 @@
+# trivy -- base defaults (shared by every cluster).
+#
+# Everything upstream lives under `trivy-operator:`. Only values that differ from
+# upstream are set here, plus a few upstream defaults restated because something
+# depends on them.
+#
+# WHERE THE RESULTS ARE. Reports are Kubernetes objects created NEXT TO what they
+# describe -- a Deployment's VulnerabilityReport sits in that Deployment's
+# namespace; ClusterRole, node and compliance reports are cluster-scoped. The
+# release namespace holds only the operator, the trivy-server, the short-lived scan
+# Jobs and the Secrets those Jobs use -- its own namespace ON PURPOSE, because the
+# upstream Role can write every Secret in it and each scan copies the scanned
+# workload's pull credentials there.
+#
+# PREREQUISITE where Reloader runs autoReloadAll: reloader.ignoreJobs must be on
+# FIRST, or every private-image scan Job is recreated mid-run and hangs.
+
+trivy-operator:
+  enabled: true
+
+  # The release name does not contain the subchart name, so upstream's fullname
+  # helper would render trivy-trivy-operator. This names the operator's
+  # Deployment, Service, ServiceAccount and bindings `trivy` -- the job label the
+  # alert rules select. Objects the OPERATOR looks up by name keep their upstream
+  # names and cannot be renamed (ConfigMaps trivy-operator*, StatefulSet
+  # trivy-server, Service trivy-service).
+  fullnameOverride: trivy
+
+  # The operator's ServiceAccount: the federated credential's subject
+  # (system:serviceaccount:trivy:trivy-operator; the identity holds AcrPull only).
+  serviceAccount:
+    name: trivy-operator
+
+  # Scan every namespace (upstream default, restated because it is the point).
+  excludeNamespaces: ""
+
+  operator:
+    # ClientServer mode: ONE trivy-server StatefulSet (PVC for the vulnerability DB);
+    # scan jobs send what they find to it instead of each downloading the DB.
+    builtInTrivyServer: true
+    # Per-finding metric trivy_vulnerability_id (labels vuln_id, fixed_version, the
+    # image and workload labels). The counts alone cannot say WHICH CVE. Off
+    # upstream for its cardinality: a few thousand series per cluster here.
+    metricsVulnIdEnabled: true
+
+  # One key sets both the trivy-server image and the scan jobs' image, so server and
+  # clients stay on the same version. Drop on the first subchart bump whose default
+  # is this or newer.
+  trivy:
+    image:
+      tag: "0.76.2"
+    # The trivy-server StatefulSet (its own key; the top-level one below covers the
+    # operator only).
+    priorityClassName: system-cluster-critical
+    server:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          memory: 1Gi
+
+  # Upstream ships no requests/limits for the operator; its memory follows the
+  # cluster's size. No CPU limit (avoid throttling the reconcile bursts of a
+  # rescan).
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+  priorityClassName: system-cluster-critical
+
+  # Metrics collection is per cluster: agent spokes scrape the operator through
+  # cluster-monitoring-agent (metrics.trivy); clusters with their own Prometheus
+  # Operator switch this on (upstream honorLabels keeps the scanned workload's
+  # `namespace`). Off here because a ServiceMonitor fails where its CRD is missing.
+  serviceMonitor:
+    enabled: false

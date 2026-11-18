@@ -1,0 +1,95 @@
+# access-api: structural defaults. Per-environment values live in gitops/services
+# (apps/access-api/<env>/). The i18n-api chart has the same shape.
+
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  repository: orgacr.azurecr.io/access-api
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+service:
+  port: 80
+  targetPort: 8080
+
+startupProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 5
+  failureThreshold: 24
+readinessProbe:
+  enabled: true
+  path: /health/ready
+  periodSeconds: 15
+  failureThreshold: 3
+livenessProbe:
+  enabled: true
+  path: /health/live
+  periodSeconds: 30
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# Accepted, not rendered (one replica; see payments-api for the reasoning).
+autoscaling:
+  enabled: false
+
+# Non-secret configuration, explicit keys in templates/configmap.yaml (hasKey-gated, so an absent
+# key keeps the image's baked default).
+env:
+  ASPNETCORE_ENVIRONMENT: Production
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: ""
+  tenantId: ""
+  authMode: vmManagedIdentity     # workloadIdentity | vmManagedIdentity | servicePrincipal
+  kubeletClientId: ""
+  credentialsSecretName: secrets-store-creds
+  secretProviderClassName: access-api-kv
+  syncedSecretName: access-api-secrets
+
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: false
+  hostnames: []
+  path: /access-api
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+verticalPodAutoscaler:
+  enabled: false
+  # Off      recommendations only; nothing changes. The default.
+  # Initial  applies the recommendation when a pod is CREATED (deploys, restarts); never evicts.
+  # Auto     also evicts running pods to resize them. With replicaCount 1 that is an outage at a
+  #          moment nobody chose, and with an HPA on CPU/memory the two controllers fight.
+  updateMode: "Off"
+  controlledResources: ["cpu", "memory"]
+  minAllowed:
+    cpu: 50m
+    memory: 128Mi
+  maxAllowed:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

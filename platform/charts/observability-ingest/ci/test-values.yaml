@@ -1,0 +1,18 @@
+# CI values: the hub (hub-dev). Same-LAN spokes connect to <node IP>:<NodePort>,
+# internet spokes through an L4 (raw TCP) forward of a public port.
+pki:
+  server:
+    dnsNames:
+      - otlp.dev.example.com
+    ipAddresses:
+      - 10.0.0.10
+spokeClients:
+  # Argo-rendered spoke, mtls.source keyVault: the bundle is copied ONCE from
+  # spoke-product-a-stage-tls into the spoke's vault and mounted by the CSI driver.
+  # A copy cannot follow cert-manager's renewal, so the cert lives as long as the
+  # CA (10y) instead of the 1y default.
+  - name: product-a-stage
+    duration: 87600h
+tenancy:
+  enabled: true
+  mode: dynamic

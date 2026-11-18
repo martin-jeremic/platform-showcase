@@ -1,0 +1,42 @@
+{{- $top := . -}}
+{{- range $name, $r := .Values.routes }}
+{{- if $r.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}-monitoring-route
+  namespace: {{ $top.Release.Namespace }}
+  labels:
+    {{- include "grafana-sso-gateway.labels" $top | nindent 4 }}
+spec:
+  hostnames:
+    - {{ required "domain is required: the public host Grafana is served on" $top.Values.domain | quote }}
+  parentRefs:
+    # .Values.gateway.namespace, NOT .Release.Namespace -- the Gateway belongs to
+    # the traefik chart (namespace traefik); this chart releases into observability.
+    # Using the release namespace pointed the route at observability/traefik-gateway,
+    # which does not exist, and an unresolvable parent is adopted by nobody: status
+    # .parents stays EMPTY with no Accepted=False and no event, and the Gateway just
+    # 404s the path. See Chart.yaml 1.0.1.
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $top.Values.gateway.name }}
+      namespace: {{ $top.Values.gateway.namespace }}
+      sectionName: {{ $top.Values.gateway.listenerName }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $r.pathPrefix | quote }}
+      backendRefs:
+        # .Release.Namespace IS correct here, unlike parentRefs above: the backing
+        # Services are created by the observability chart into this same namespace.
+        # Do not "fix" this one to match.
+        - group: ""
+          kind: Service
+          name: {{ $r.service }}
+          namespace: {{ $top.Release.Namespace }}
+          port: {{ $r.port }}
+{{- end }}
+{{- end }}

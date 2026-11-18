@@ -1,0 +1,66 @@
+# product-b-api CD to the dev namespace (push-based). Register as `product-b-api-cd`.
+#
+#   RefusePlaceholders -> Migrate_Dev -> Deploy_Dev
+#
+# Dev values are committed with <<MARKER>> placeholders for facts still being gathered (hosts,
+# realm, vault). RefusePlaceholders fails the deploy, naming file, line and marker, while any marker
+# remains; pull requests stay green meanwhile.
+#
+# SCHEMA FIRST, CODE SECOND. The migration Job (product-b-db: the migrator in the API image, the SAME
+# digest) must COMPLETE (--wait-for-jobs) before the API rolls. Old pods meanwhile run against the
+# new schema, which is safe because platform migrations expand before they contract (asserted by a
+# test).
+#
+# NOT copied from product-a: the "untick to deploy past a failing migration ONCE" checkbox
+# (runMigrations stays at its default, true, and is not exposed as a run parameter). Deploying past
+# a failed migration means running code against a schema it was not built for, and the checkbox is
+# the switch that makes that a habit. A failed migration is fixed and re-run.
+#
+# Secrets reach the pods through the Key Vault CSI driver; the pipeline handles none.
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+  pipelines:
+    - pipeline: ci
+      source: product-b-api-ci
+      trigger:
+        branches:
+          include:
+            - develop
+
+variables:
+  devNamespace: product-b-dev
+  version: $(resources.pipeline.ci.runName)
+
+stages:
+  - template: stages/refuse-placeholders-stage.yml@templates
+    parameters:
+      valuesFiles:
+        - deploy/charts/product-b-api/values-dev.yaml
+        - deploy/charts/product-b-db/values-dev.yaml
+
+  - template: stages/migration-deploy-stage.yml@templates
+    parameters:
+      dependsOn: [RefusePlaceholders]
+      condition: and(succeeded(), eq(variables['resources.pipeline.ci.sourceBranch'], 'refs/heads/develop'))
+      namespace: $(devNamespace)
+      chartName: product-b-db
+      imageName: product-b-api
+      version: $(version)
+      valuesFile: deploy/charts/product-b-db/values-dev.yaml
+
+  - template: stages/deploy-environment-stage.yml@templates
+    parameters:
+      dependsOn: [Migrate_Dev]
+      condition: and(succeeded(), eq(variables['resources.pipeline.ci.sourceBranch'], 'refs/heads/develop'))
+      namespace: $(devNamespace)
+      chartName: product-b-api
+      imageName: product-b-api
+      version: $(version)
+      valuesFile: deploy/charts/product-b-api/values-dev.yaml

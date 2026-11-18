@@ -1,0 +1,5 @@
+# <pipeline-name>|<display name>|<path filter>
+# Each path filter mirrors the paths.include of that PR.yml: the YAML `pr:` block itself is
+# ignored for Azure Repos, so this list is what actually decides which PRs a pipeline validates.
+payments-api-pr|PR: payments-api|/src/Payments.Api/*;/src/Payments.Domain/*;/tests/*;/Directory.Packages.props;/charts/payments-api/*;/pipelines/api/*
+payments-admin-web-pr|PR: payments-admin-web|/src/admin-web/*;/charts/payments-admin-web/*;/pipelines/admin-web/*

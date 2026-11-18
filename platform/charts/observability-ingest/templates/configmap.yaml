@@ -1,0 +1,12 @@
+{{- if .Values.alloy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observability-ingest-alloy-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-ingest.labels" . | nindent 4 }}
+data:
+  config.alloy: |-
+{{ include "observability-ingest.alloyConfig" . | indent 4 }}
+{{- end }}

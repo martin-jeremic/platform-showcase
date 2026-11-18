@@ -1,0 +1,53 @@
+apiVersion: v2
+name: traefik
+description: >-
+  Platform Traefik API Gateway. Umbrella chart that installs the upstream Traefik
+  controller in Gateway-API mode and templates the GatewayClass, the central
+  Gateway (HTTP + HTTPS listeners), the cert-manager Certificate, ReferenceGrants
+  and HTTPRoutes. Adds the production edge hardening the chart it was forked from
+  had none of: an HTTP->HTTPS redirect, a cluster-wide TLS floor and
+  security-header / rate-limit middleware that is actually attached to traffic.
+type: application
+
+# Version of THIS umbrella chart. Bump on any change to templates or defaults;
+# the gitops descriptor pins the matching git tag.
+#
+# 1.2.0 -- traefik chart 39.0.7 -> 42.2.0 (three chart majors; Traefik v3.6.12 ->
+#   v3.7.16). What it took:
+#     - the Gateway API CRDs are owned HERE now (crds/, standard v1.6.3): traefik
+#       chart 40.2.0 stopped bundling them, and v3.7.16 is built against v1.6.3
+#       (v3.7 needs >= v1.5; the cluster ran the subchart's v1.4.0). The upstream
+#       safe-upgrades admission policy that ships with them is a template, not a
+#       CRD -- see values.yaml.
+#     - chart 41.0.0 renamed logs.general/logs.access -> log/accessLog (the
+#       subchart schema rejects `logs`); same flags rendered.
+#     - providers.kubernetesCRD.defaultTLSResourcesNamespace (Traefik v3.7.11+)
+#       pins the cluster-wide `default` TLSOption to this namespace, which until
+#       now the values only claimed.
+#   ONE-WAY: once the safe-upgrades policy is live it denies Gateway API CRDs older
+#   than v1.6, so re-syncing 1.1.0 (v1.4.0) fails at the CRD apply -- roll forward.
+version: 1.2.0
+
+# Traefik version shipped by the pinned subchart (traefik 42.2.0 -> app v3.7.16).
+appVersion: "v3.7.16"
+
+keywords:
+  - traefik
+  - gateway-api
+  - ingress
+  - api-gateway
+home: https://traefik.io/
+sources:
+  - https://github.com/traefik/traefik-helm-chart
+
+dependencies:
+  # Upstream Traefik controller. Pinned exactly; `helm dependency build` fetches it
+  # into charts/ (gitignored). Its crds/ directory carries the traefik.io CRDs,
+  # including tlsoptions and middlewares -- required by the edge hardening below,
+  # and only watched when providers.kubernetesCRD is on.
+  #
+  # It NO LONGER carries the Gateway API CRDs (dropped in traefik chart 40.2.0).
+  # Since 1.2.0 they are vendored in THIS chart's crds/ -- see values.yaml.
+  - name: traefik
+    version: "42.2.0"
+    repository: "https://traefik.github.io/charts"

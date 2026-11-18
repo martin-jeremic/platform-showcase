@@ -1,0 +1,60 @@
+# PR gate for this repository. Renders every app/env with its PINNED chart from the registry and
+# fails when a ConfigMap key is empty, drifts between environments, is inherited from a chart
+# default, or is committed in a form the app cannot read; and when a paired app's pins differ.
+# See scripts/check-configmaps.py and scripts/configmap-exceptions.yaml.
+#
+# Registered as a build-validation branch policy on main (the YAML `pr:` block alone does nothing
+# for Azure Repos; see shared-templates scripts/ado/set-branch-policies.sh).
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - apps/**
+      - scripts/**
+
+pool:
+  name: Default
+
+variables:
+  acrName: productacr
+  armServiceConnection: arm-product-a-acr-pull
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+
+  - task: UsePythonVersion@0
+    displayName: Python 3.12
+    inputs:
+      versionSpec: '3.12'
+
+  - bash: python -m pip install --quiet --disable-pip-version-check pyyaml==6.0.2
+    displayName: Install PyYAML
+
+  - task: HelmInstaller@1
+    displayName: Install Helm
+    inputs:
+      helmVersionToInstall: '4.2.0'
+
+  # The charts are OCI artifacts, so helm needs a registry login. The service connection maps to
+  # an identity with AcrPull only.
+  - task: AzureCLI@2
+    displayName: helm registry login
+    env:
+      ACR_NAME: $(acrName)
+    inputs:
+      azureSubscription: $(armServiceConnection)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv \
+          | helm registry login "$ACR_NAME.azurecr.io" --username 00000000-0000-0000-0000-000000000000 --password-stdin
+
+  - bash: python scripts/check-configmaps.py
+    displayName: ConfigMap completeness + consistency + pin pairs

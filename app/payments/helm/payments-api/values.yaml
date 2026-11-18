@@ -1,0 +1,132 @@
+# payments-api: structural defaults. Per-environment values live in gitops/services
+# (apps/payments-api/<env>/values.yaml by hand, image.yaml written by the promotion).
+
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  repository: orgacr.azurecr.io/payments-api
+  # Written per environment into image.yaml as {tag, digest}. The digest is what deploys; the tag
+  # is only for humans reading the file.
+  tag: ""
+  digest: ""
+  # FIX: was Always with an acr-auth imagePullSecret. Digests are immutable (IfNotPresent) and the
+  # nodes of aks-org-prod pull with their kubelet identity, so there is no pull secret there.
+  pullPolicy: IfNotPresent
+
+# Empty where the node identity pulls. The on-prem hub has none and names its namespace pull
+# secret here. Naming a pull secret that does not exist logs "Unable to retrieve pull secret" on
+# every pod while the pull succeeds: noise that hides real failures.
+imagePullSecrets: []
+
+serviceAccount:
+  # FIX: was true. Nothing in the pod talks to the Kubernetes API.
+  automount: false
+
+workloadIdentity:
+  enabled: false
+  clientId: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  port: 80
+  targetPort: 8080
+
+startupProbe:
+  enabled: true
+  path: /healthz/live
+  periodSeconds: 5
+  failureThreshold: 24
+readinessProbe:
+  enabled: true
+  path: /healthz/ready
+  periodSeconds: 15
+  failureThreshold: 3
+livenessProbe:
+  enabled: true
+  path: /healthz/live
+  periodSeconds: 30
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# Not rendered: payments-api runs one replica on a single-node cluster, so the key is accepted and
+# ignored rather than offering an HPA that cannot schedule. See KNOWN-GAPS.
+autoscaling:
+  enabled: false
+
+otel:
+  enabled: false
+  endpoint: ""
+
+# Non-secret configuration ("__" = .NET section separator), rendered into a ConfigMap and injected
+# with envFrom. The image bakes its defaults in config/*.config.json. A key here OVERRIDES a baked
+# default, so the rule is: only keys that must differ per environment, and never a key with an empty
+# value. templates/configmap.yaml lists every key the chart accepts.
+env:
+  ASPNETCORE_ENVIRONMENT: Production
+  AdminDocuments__Path: /data/documents
+  # Outbound webhooks OFF by default, so a fresh environment cannot start posting to whatever
+  # addresses happen to be in a restored database. Turn on once the receivers are confirmed.
+  WebhookDispatcher__Enabled: "false"
+  Reconciliation__Enabled: "false"
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: ""            # kv-org-<env>
+  tenantId: ""
+  # workloadIdentity | vmManagedIdentity | servicePrincipal (templates/secretproviderclass.yaml)
+  authMode: workloadIdentity
+  kubeletClientId: ""         # vmManagedIdentity only: the node identity's CLIENT id
+  credentialsSecretName: secrets-store-creds   # servicePrincipal only
+  secretProviderClassName: payments-api-kv
+  syncedSecretName: payments-api-secrets
+
+# Empty Opaque Secret with the same keys the CSI driver would sync, rendered only when
+# azureKeyVault is off (a local `helm template`, a cluster without the driver), so envFrom secretRef
+# resolves and the pod reports missing configuration itself instead of failing
+# CreateContainerConfigError.
+fallbackSecret:
+  name: payments-api-secret
+
+# Invoice documents: the invoicing service writes, the API serves read-only. Off until an RWX
+# storage class is chosen for the environment.
+sharedDocuments:
+  enabled: false
+  existingClaim: ""
+  mountPath: /data/documents
+
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+
+# Payment-provider callbacks and the admin API. With a path prefix and a rewrite, PUBLIC_BASE_URL
+# must include the prefix: the provider calls back exactly the URL the service signed.
+route:
+  enabled: true
+  hostnames: []
+  path: /
+  rewrite:
+    enabled: false
+    replacePrefixMatch: /
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

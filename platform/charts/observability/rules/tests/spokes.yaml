@@ -1,0 +1,48 @@
+# promtool unit tests for rules/spokes.yaml -- the "was there, now gone" shape:
+#   promtool test rules observability/rules/tests/spokes.yaml
+# Run by tools/check-platform.sh when promtool is available. Not loaded into the
+# chart: templates/prometheus-rules.yaml globs rules/*.yaml only.
+#
+# product-a-stage's agent stops shipping at 30m; the hub keeps reporting. A
+# cluster that never had a kube-state-metrics target (none here) never fires.
+rule_files:
+  - ../spokes.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: a spoke goes silent, the hub keeps reporting
+    interval: 1m
+    input_series:
+      - series: 'up{cluster="hub-dev", job="kube-state-metrics", instance="10.0.0.10:8080"}'
+        values: '1x90'
+      # 31 samples (0m..30m), then nothing: the series goes stale 5m later.
+      - series: 'up{cluster="product-a-stage", job="kube-state-metrics", instance="kube-state-metrics.observability.svc.cluster.local:8080"}'
+        values: '1x30'
+
+    alert_rule_test:
+      # Still reporting.
+      - alertname: PlatformClusterSilent
+        eval_time: 25m
+        exp_alerts: []
+      # Stale since ~35m, so pending (for: 10m).
+      - alertname: PlatformClusterSilent
+        eval_time: 40m
+        exp_alerts: []
+      # Firing for the spoke only -- `by (cluster)` keeps the hub out of it.
+      - alertname: PlatformClusterSilent
+        eval_time: 60m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              cluster: product-a-stage
+            exp_annotations:
+              summary: "product-a-stage stopped reporting"
+              description: >-
+                No kube-state-metrics sample from product-a-stage for 10m, after
+                it reported within the last 7 days. Every alert for that cluster is
+                blind until this resolves. On an agent spoke check the
+                cluster-monitoring-agent-alloy DaemonSet there and its export errors
+                (TLS = the client cert or the hub CA in its /etc/alloy/tls mount); on
+                the hub check observability-ingest-alloy. Resolves by itself 7 days
+                after a planned decommission.

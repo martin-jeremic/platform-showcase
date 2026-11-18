@@ -1,0 +1,98 @@
+# hr-app: ONE chart, four releases. Each HR SPA is its own Argo Application (hr-portal, hr-admin,
+# hr-absence, hr-employee-book) with its own gitops/services folder:
+#   apps/hr-<app>/<env>/values.yaml   (this file's keys, by hand)
+#   apps/hr-<app>/<env>/image.yaml    (image.tag + image.digest, written by CD)
+# CI renders this chart against those exact files before it pushes the chart (pipelines/CI.yml).
+
+# Set per app (hr-portal, ...), so four releases in one namespace never collide. Default: the
+# release name.
+nameOverride: ""
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  # One chart, four images. Empty = <defaultRegistry>/<fullname>, e.g. orgacr.azurecr.io/hr-portal,
+  # so an app's gitops folder does not have to repeat its own name.
+  repository: ""
+  defaultRegistry: orgacr.azurecr.io
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Empty where the node identity pulls; the on-prem hub names its namespace pull secret here.
+imagePullSecrets: []
+
+service:
+  port: 80
+  targetPort: 8080
+
+startupProbe:
+  enabled: true
+  path: /health
+  periodSeconds: 5
+  failureThreshold: 12
+readinessProbe:
+  enabled: true
+  path: /health
+  periodSeconds: 15
+  failureThreshold: 3
+livenessProbe:
+  enabled: true
+  path: /health
+  periodSeconds: 30
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Accepted, not rendered: a static SPA at one replica needs no HPA.
+autoscaling:
+  enabled: false
+
+# Rendered into the ConfigMap the entrypoint reads (envFrom). The keys ARE the entrypoint's variable
+# names, so there is no mapping layer to get wrong. EVERY key is required: an empty value would
+# leave the SPA on the placeholders baked into its environment.ts (localhost URLs), which load fine
+# and then fail at runtime, in the user's browser, with nothing in any server log.
+env:
+  IDENTITY_URL: ""             # https://<host>/keycloak/realms/org
+  IDENTITY_SCOPE: "openid profile email"
+  IDENTITY_CLIENT: ""          # hr-<app>
+  IDENTITY_REDIRECT_URI: ""
+  API_URL: ""                  # https://<host>/hr-api
+
+# Sibling app paths, resolved by each SPA against its own origin to link to the others. Each must
+# equal that app's baked baseHref and its own route.path.
+apps:
+  portal: ""
+  admin: ""
+  absence: ""
+  employeeBook: ""
+
+configMap:
+  # Each release renders its own ConfigMap. create: false is for a ConfigMap managed outside the
+  # chart; the Deployment still reads configMap.name.
+  create: true
+  name: ""                     # default: <fullname>-config
+
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+
+route:
+  enabled: true
+  hostnames: []
+  # This release's own prefix, e.g. /hr-portal. Rewritten to / before nginx sees it.
+  path: ""
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

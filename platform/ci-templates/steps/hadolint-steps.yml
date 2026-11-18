@@ -1,0 +1,67 @@
+# steps/hadolint-steps.yml
+#
+# Lint one Dockerfile with hadolint. WARN-ONLY by decision: findings become pipeline warnings and
+# a "hadolint" summary tab, never a failure, so a PR is not blocked while existing findings are
+# worked off one by one. The job result stays Succeeded on purpose (not SucceededWithIssues).
+#
+# hadolint is not preinstalled on the self-hosted agents: the pinned release is downloaded once
+# per agent into the tool cache, verified against the SHA-256 below, and reused. To upgrade,
+# change BOTH the version and the checksum (release asset hadolint-linux-x86_64.sha256). A failed
+# download or check is a warning ("NOT linted"), never a failed job.
+
+parameters:
+  # Dockerfile to lint, relative to the repository root.
+  - name: dockerfile
+    type: string
+  - name: hadolintVersion
+    type: string
+    default: '2.15.1'
+  - name: hadolintSha256
+    type: string
+    default: 'c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507'
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - bash: |
+      set -euo pipefail
+      BIN_DIR="$AGENT_TOOLSDIRECTORY/hadolint/$HADOLINT_VERSION"
+      BIN="$BIN_DIR/hadolint"
+      not_linted() { echo "##vso[task.logissue type=warning]$DOCKERFILE was NOT linted: $1"; exit 0; }
+
+      [ -f "$DOCKERFILE" ] || not_linted "file not found."
+      if [ ! -x "$BIN" ]; then
+        TMP="$(mktemp -d)"
+        trap 'rm -rf "$TMP"' EXIT
+        curl -fsSL -o "$TMP/hadolint" \
+          "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64" \
+          || not_linted "hadolint $HADOLINT_VERSION could not be downloaded."
+        echo "$HADOLINT_SHA256  $TMP/hadolint" | sha256sum -c --status - \
+          || not_linted "the hadolint $HADOLINT_VERSION download failed its SHA-256 check."
+        mkdir -p "$BIN_DIR"
+        install -m 0755 "$TMP/hadolint" "$BIN"
+      fi
+
+      REPORT="$AGENT_TEMPDIRECTORY/hadolint.txt"
+      "$BIN" --no-fail --no-color "$DOCKERFILE" > "$REPORT" 2>&1 \
+        || { cat "$REPORT"; not_linted "hadolint could not process the file (output above)."; }
+      cat "$REPORT"
+
+      SUMMARY="$AGENT_TEMPDIRECTORY/hadolint.md"
+      {
+        echo "### hadolint $HADOLINT_VERSION: \`$DOCKERFILE\`"
+        echo
+        if [ -s "$REPORT" ]; then echo '```'; cat "$REPORT"; echo '```'; else echo "No findings."; fi
+      } > "$SUMMARY"
+      if [ -s "$REPORT" ]; then
+        FINDINGS="$(awk 'END { print NR }' "$REPORT")"
+        echo "##vso[task.logissue type=warning]hadolint: $FINDINGS finding(s) in $DOCKERFILE (see the 'hadolint' summary)."
+      fi
+      echo "##vso[task.uploadsummary]$SUMMARY"
+    displayName: hadolint ${{ parameters.dockerfile }}
+    condition: ${{ parameters.condition }}
+    env:
+      DOCKERFILE: ${{ parameters.dockerfile }}
+      HADOLINT_VERSION: ${{ parameters.hadolintVersion }}
+      HADOLINT_SHA256: ${{ parameters.hadolintSha256 }}

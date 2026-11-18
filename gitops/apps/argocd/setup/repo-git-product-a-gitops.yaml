@@ -1,0 +1,31 @@
+# Registers THIS GitOps repo as an Argo CD repository so Argo can run the git-files generator
+# and use it as the $values source. Template only: never commit a filled-in copy.
+#
+# The `url` MUST match the repoURL in appsets/*.yaml exactly (scheme, case, %-encoding).
+# The token needs Code (Read). `username` can be any non-empty string; Azure DevOps
+# authenticates on the token alone.
+#
+# forceHttpBasicAuth: "true" is REQUIRED for Azure DevOps. ADO answers a credential-less request
+# with a 302 redirect to its sign-in page instead of a 401 challenge, so git never learns that it
+# should send the credential and Argo fails with
+#   failed to list refs: ... info/refs?service=git-upload-pack status code: 302
+# The flag makes Argo send the basic-auth header preemptively.
+#
+# ONE-TIME and UNMANAGED: not listed in ../kustomization.yaml, so no prune can ever delete the
+# credential Argo needs to read the repository that tells it what to do.
+#
+#   kubectl -n argocd-hub apply -f repo-git-product-a-gitops.yaml   (or: bash ../setup.sh)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-product-a-gitops
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: git
+  url: https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+  username: azuredevops
+  password: REPLACE_ME   # Azure DevOps token, Code (Read)
+  forceHttpBasicAuth: "true"

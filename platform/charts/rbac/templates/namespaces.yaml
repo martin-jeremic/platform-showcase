@@ -1,0 +1,30 @@
+{{- include "rbac.validate" . -}}
+{{- /*
+Application namespaces.
+
+Declared HERE rather than in the services tree so each RoleBinding is created in
+the same sync as the namespace it targets — no cross-repo ordering, no
+failing-then-retrying while Argo waits for a namespace someone else owns.
+
+sync-wave "0" puts every Namespace ahead of the bindings in wave "1", so a single
+sync cannot race itself.
+*/ -}}
+{{- range .Values.namespaces }}
+{{- if .create }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "rbac.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    {{- if $.Values.protectNamespaces }}
+    {{- /* Removing an entry from values orphans the namespace instead of deleting
+           it and everything inside. Delete by hand when that is really intended. */}}
+    argocd.argoproj.io/sync-options: Prune=false
+    {{- end }}
+    example.com/entra-group: {{ .entraGroupName | quote }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,3 @@
+tenant: aks-product-a-demo
+rules:
+  ingestRate: true

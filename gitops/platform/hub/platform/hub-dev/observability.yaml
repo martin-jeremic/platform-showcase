@@ -1,0 +1,8 @@
+# Platform descriptor -- its PRESENCE deploys 'observability' to 'hub-dev'.
+# The CENTRAL stack: also stores every agent spoke's telemetry (through
+# observability-ingest) and evaluates their alerts.
+chartPath:     observability
+chartRevision: observability-3.4.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   observability
+namespace:     observability
+syncWave:      "3"

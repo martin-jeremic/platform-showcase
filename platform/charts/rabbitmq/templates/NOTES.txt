@@ -1,0 +1,18 @@
+RabbitMQ is running in your cluster.
+
+Get the service:
+  kubectl get svc {{ include "rabbitmq.fullname" . }} -n {{ .Release.Namespace }}
+
+AMQP connection string (for apps inside the cluster):
+  amqp://{{ .Values.auth.username }}:<password>@{{ include "rabbitmq.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.amqpPort }}/
+
+Management UI — port-forward for local access:
+  kubectl port-forward svc/{{ include "rabbitmq.fullname" . }} 15672:{{ .Values.service.managementPort }} -n {{ .Release.Namespace }}
+  Then open: http://localhost:15672  (credentials: {{ .Values.auth.username }} / <password from vault>)
+
+Credentials are stored in Secret: {{ include "rabbitmq.secretName" . }}
+{{- if .Values.azureKeyVault.enabled }}
+  (synced from Azure Key Vault {{ .Values.azureKeyVault.keyvaultName }} via CSI driver)
+{{- else }}
+  kubectl get secret {{ include "rabbitmq.secretName" . }} -n {{ .Release.Namespace }} -o jsonpath="{.data.rabbitmq-password}" | base64 -d
+{{- end }}

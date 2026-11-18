@@ -1,0 +1,156 @@
+# promtool unit tests for rules/controlplane.yaml:
+#   promtool test rules observability/rules/tests/controlplane.yaml
+# Run by tools/check-observability.sh. This directory is NOT loaded into the
+# chart: templates/prometheus-rules.yaml globs rules/*.yaml, which does not
+# descend into rules/tests/.
+#
+# The input series copy the hub's real shape, read live:
+#   - apiserver_watch_cache_read_wait_seconds_bucket: the 14 buckets the
+#     microk8s 1.36 apiserver exposes, `le` spelled as Prometheus 3 stores it
+#     ("2.0", "3.0"). A STALE read times out just over 3 s, so it is counted in
+#     le="+Inf" only -- every finite bucket, le="3.0" included, stays flat (that
+#     is what a real stale incident looks like in the buckets).
+#   - node-exporter scraped every 30 s; a disk stall is one sample.
+# evaluation_interval matches the hub Prometheus (30s).
+rule_files:
+  - ../controlplane.yaml
+
+evaluation_interval: 30s
+# histogram_quantile interpolates: 0.9 * 0.005 comes out as 0.0045000000000000005.
+fuzzy_compare: true
+
+tests:
+  # Healthy (every read <= 5 ms) until 20m, stale 21m..41m, healthy again from 42m.
+  # Healthy: every bucket +2 per minute. Stale: finite buckets flat, +Inf +30/min.
+  - name: watch cache goes stale, then recovers
+    interval: 1m
+    input_series:
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.005"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.025"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.05"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.1"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.2"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.4"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.6"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="0.8"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="1.0"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="1.25"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="1.5"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="2.0"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="3.0"}'
+        values: '0+2x20 40x20 42+2x20'
+      - series: 'apiserver_watch_cache_read_wait_seconds_bucket{cluster="hub-dev", job="apiserver", le="+Inf"}'
+        values: '0+2x20 70+30x20 672+2x20'
+
+    promql_expr_test:
+      # The dashboard's freshness value: healthy ~0.005 ...
+      - expr: histogram_quantile(0.9, sum by (cluster, le) (rate(apiserver_watch_cache_read_wait_seconds_bucket{job="apiserver"}[5m])))
+        eval_time: 15m
+        exp_samples:
+          - labels: '{cluster="hub-dev"}'
+            value: 0.0045
+      # ... and exactly 3 once the reads land in +Inf.
+      - expr: histogram_quantile(0.9, sum by (cluster, le) (rate(apiserver_watch_cache_read_wait_seconds_bucket{job="apiserver"}[5m])))
+        eval_time: 35m
+        exp_samples:
+          - labels: '{cluster="hub-dev"}'
+            value: 3
+
+    alert_rule_test:
+      - alertname: PlatformApiserverWatchCacheStale
+        eval_time: 15m
+        exp_alerts: []
+      # Above 2 since 21m: still pending (for: 2m).
+      - alertname: PlatformApiserverWatchCacheStale
+        eval_time: 22m
+        exp_alerts: []
+      - alertname: PlatformApiserverWatchCacheStale
+        eval_time: 24m
+        exp_alerts: &stale
+          - exp_labels:
+              severity: critical
+              cluster: hub-dev
+            exp_annotations:
+              summary: "hub-dev control plane is serving stale data"
+              description: >-
+                kube-apiserver on hub-dev has lost its datastore (k8s-dqlite):
+                reads time out waiting for the watch cache (p90 3s;
+                healthy ~5ms, 3s = timed out), so the control plane is serving STALE data.
+                Nodes show NotReady, Argo CD stalls and unrelated alerts follow; none of them
+                is the cause. Restore it on the node, dqlite FIRST, then kubelite --
+                `sudo snap restart microk8s.daemon-k8s-dqlite && sudo snap restart microk8s.daemon-kubelite`
+                -- restarting kubelite alone does not fix it. The trigger is a hub SSD write
+                stall (PlatformNodeDiskWriteStall just before this); replacing the disk is the
+                permanent fix.
+      - alertname: PlatformApiserverWatchCacheStale
+        eval_time: 40m
+        exp_alerts: *stale
+      # The 5m rate window holds only healthy reads again.
+      - alertname: PlatformApiserverWatchCacheStale
+        eval_time: 50m
+        exp_alerts: []
+
+  # Normal 2 ms per write (100 writes/s, 0.2 s write time/s). Between 5m and
+  # 5m30s one stall: 30 writes taking 12 s in total = 400 ms per write.
+  # product-a-stage stalls at the same moment and must NOT fire: the rule names the
+  # hub's disk only, although the hub Prometheus holds the spokes' series too.
+  - name: hub SSD write stall
+    interval: 30s
+    input_series:
+      - series: 'node_disk_write_time_seconds_total{cluster="hub-dev", device="sda", instance="10.0.0.10:9100", job="node-exporter"}'
+        values: '0+6x10 72+6x10'
+      - series: 'node_disk_writes_completed_total{cluster="hub-dev", device="sda", instance="10.0.0.10:9100", job="node-exporter"}'
+        values: '0+3000x10 30030+3000x10'
+      - series: 'node_disk_write_time_seconds_total{cluster="product-a-stage", device="sda", instance="10.0.0.5:9100", job="node-exporter"}'
+        values: '0+6x10 72+6x10'
+      - series: 'node_disk_writes_completed_total{cluster="product-a-stage", device="sda", instance="10.0.0.5:9100", job="node-exporter"}'
+        values: '0+3000x10 30030+3000x10'
+
+    promql_expr_test:
+      # The dashboard's latency value before the stall.
+      - expr: |
+          max by (cluster, instance) (
+            1000 * rate(node_disk_write_time_seconds_total{cluster="hub-dev", device="sda"}[1m])
+                 / rate(node_disk_writes_completed_total{cluster="hub-dev", device="sda"}[1m])
+          )
+        eval_time: 5m
+        exp_samples:
+          - labels: '{cluster="hub-dev", instance="10.0.0.10:9100"}'
+            value: 2
+
+    alert_rule_test:
+      - alertname: PlatformNodeDiskWriteStall
+        eval_time: 5m
+        exp_alerts: []
+      # for: 0m -- the one stalled sample fires at once.
+      - alertname: PlatformNodeDiskWriteStall
+        eval_time: 5m30s
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              cluster: hub-dev
+              instance: 10.0.0.10:9100
+            exp_annotations:
+              summary: "hub-dev SSD write stall (400 ms per write)"
+              description: >-
+                The hub SSD on hub-dev (10.0.0.10:9100) stalled writes:
+                400 ms per write averaged over 1m (normal 1-3 ms). These
+                freezes are what break the kube-apiserver to k8s-dqlite connection; if
+                PlatformApiserverWatchCacheStale follows, the control plane is serving stale
+                data. The disk is failing: the permanent fix is replacing it.
+      # One sample later the 1m window no longer holds the stall.
+      - alertname: PlatformNodeDiskWriteStall
+        eval_time: 6m
+        exp_alerts: []

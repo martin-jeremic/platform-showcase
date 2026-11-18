@@ -1,0 +1,17 @@
+apiVersion: v2
+name: azurite
+description: >-
+  Azurite -- the Azure Storage emulator -- as the blob/queue/table backend for the
+  product stack on clusters with no real Azure Storage account. Single-replica
+  Deployment (Recreate) with persistent storage and a Service exposing the blob,
+  queue and table ports. No secret: the emulator's well-known account key is a
+  public constant, which is exactly why this never runs where real data lives.
+type: application
+version: 0.2.0
+# image.tag defaults to this.
+appVersion: "3.37.0"
+keywords:
+  - azurite
+  - azure-storage
+sources:
+  - https://github.com/Azure/Azurite

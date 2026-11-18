@@ -1,0 +1,76 @@
+# product-a-web: structural defaults. Per-environment values live in gitops/apps
+# (apps/product-a-web/<env>/). A browser app holds no secrets: no Key Vault, no workload identity.
+
+fullnameOverride: ""
+replicaCount: 2
+
+image:
+  repository: productacr.azurecr.io/product-a-web
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Empty on AKS (kubelet identity pulls); the on-prem spoke names its namespace pull secret here.
+imagePullSecrets: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  port: 80
+  targetPort: 8080
+
+# /healthz is answered by nginx itself (nginx.conf), independent of the bundle and of env.js.
+startupProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 5
+  failureThreshold: 30
+readinessProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 10
+  failureThreshold: 3
+livenessProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 30
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# window.__env, rendered key by key into env.js (templates/configmap.yaml). Every key is required:
+# the production bundle refuses to start without them, and a blank page with a console error is a
+# worse place to find that out than a failed render.
+config:
+  environment: ""
+  apiBaseUrl: ""        # https://<host>/admin/api
+  oidcAuthority: ""     # https://<host>/keycloak/realms/product-a-<env>
+  oidcClientId: ""      # product-a-web
+  oidcScope: "openid profile email"
+
+gateway:
+  enabled: false
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+
+route:
+  enabled: false
+  hostnames: []
+  path: /
+  rewrite:
+    enabled: false
+    replacePrefixMatch: /

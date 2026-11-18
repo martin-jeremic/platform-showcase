@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'rabbitmq' to 'product-a-stage'.
+chartPath:     rabbitmq
+chartRevision: rabbitmq-1.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   rabbitmq
+namespace:     rabbitmq
+syncWave:      "3"

@@ -1,0 +1,11 @@
+# Third render: the aks-org-prod shape (node identity for Key Vault and for pulls).
+image:
+  digest: sha256:1b158839f8aa339e89bb50b1603e90ec68e0fd5565fe10a7cb32729fddf7070a
+azureKeyVault:
+  keyvaultName: kv-org-prod
+  tenantId: 11111111-1111-1111-1111-111111111111
+  authMode: vmManagedIdentity
+  kubeletClientId: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+route:
+  hostnames:
+    - services.example.com

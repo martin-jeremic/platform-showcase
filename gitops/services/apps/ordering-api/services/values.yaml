@@ -1,0 +1,76 @@
+# Non-secret services overrides for the ordering-api chart, release ordering-api, cluster aks-org-prod (registered spoke).
+# Hand-maintained: the CD promotion never touches this file (it writes image.yaml and moves
+# chart.version in release.yaml only).
+#
+# PREPARED, NOT DEPLOYED: there is no release.yaml next to this file, so the ApplicationSet
+# generates nothing for it (presence of release.yaml is the deploy switch). ordering-api needs
+# MongoDB and aks-org-prod provides none yet (README, KNOWN-GAPS). A promotion to services fails
+# loudly until release.yaml is seeded, by design.
+
+# ── Routing: path-per-app on the single host services.example.com (README, path allocation) ──
+# sectionName pins the route to the TLS listener; without it the route also binds the plain-HTTP
+# listener and the app answers on :80. Listener hostnames match EXACTLY: a stale per-app hostname
+# reports NoMatchingParent while Argo still shows Synced/Healthy.
+gateway:
+  enabled: true
+  name: traefik-gateway
+  namespace: traefik
+  sectionName: websecure
+route:
+  enabled: true
+  hostnames:
+    - services.example.com
+  path: /ordering-api
+  rewrite:
+    enabled: true
+    replacePrefixMatch: /
+
+# The node identity holds AcrPull on the registry: no pull secret. A reference to one that does
+# not exist logs "Unable to retrieve pull secret" on every pod while the pull succeeds: noise that
+# hides real failures.
+imagePullSecrets: []
+
+# ── Configuration (ConfigMap) ────────────────────────────────────────────────────────────────
+env:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_FORMAT: "json"
+  DB_NAME: "ordering"
+  IDENTITY_ISSUER: "https://services.example.com/keycloak/realms/org"
+  IDENTITY_JWKS_URI: "https://services.example.com/keycloak/realms/org/protocol/openid-connect/certs"
+  ACCESS_API_URL: "http://access-api.access.svc.cluster.local"
+  MAIL_TENANT_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  MAIL_SENDER: "ordering@example.com"
+
+# ── Secrets (Secrets Store CSI driver) ───────────────────────────────────────────────────────
+# Only real secrets, one PLAIN value per Key Vault object (no JSON blobs, no Base64), each synced
+# into the pod as one environment variable:
+#   ordering-api--mongo-connection
+#   ordering-api--mail-client-secret
+# The driver fails the WHOLE mount if one object is missing: the pod sits in ContainerCreating
+# with no useful event while Argo shows Synced. Seed first, promote second:
+#   VAULT=kv-org-prod bash bootstrap/populate-kv.sh ordering-api mongo-connection mail-client-secret
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-org-prod
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  # The driver authenticates as the node pool's identity, which holds Key Vault Secrets User on
+  # kv-org-prod. kubeletClientId is the CLIENT id of that identity, NOT the object (principal) id
+  # from the role assignment: they are different GUIDs, and swapping them fails the mount.
+  authMode: vmManagedIdentity
+  kubeletClientId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+# ── Capacity ─────────────────────────────────────────────────────────────────────────────────
+# aks-org-prod is a single node that also hosts the identity provider, the broker, the gateway
+# and monitoring. Autoscaling stays off on purpose: a chart default of maxReplicas 10 cannot fit
+# and would only pile up Pending pods. Revisit when a second node is added.
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

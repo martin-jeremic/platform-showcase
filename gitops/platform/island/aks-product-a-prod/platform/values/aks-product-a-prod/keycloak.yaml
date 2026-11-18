@@ -1,0 +1,15 @@
+# Image pinned by DIGEST (CI writes it). The realm `product-a` holds the platform
+# clients `argocd` and `grafana`.
+image:
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+azureKeyVault:
+  workloadIdentityClientId: "33333333-3333-3333-3333-333333333333"
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  keyvaultName: kv-product-a-prod
+config:
+  host: app.product-a.example.net
+  keycloak:
+    dbUrl: "jdbc:postgresql://psql-product-a-prod.postgres.database.azure.com:5432/keycloak?sslmode=require"
+    dbUsername: keycloak
+  options:
+    JAVA_OPTS_APPEND: "-Djgroups.dns.query=keycloak-headless.keycloak.svc.cluster.local"

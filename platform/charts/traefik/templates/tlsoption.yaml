@@ -1,0 +1,47 @@
+{{- /*
+Cluster-wide TLS floor.
+
+A Traefik TLSOption named exactly `default`, in the namespace Traefik runs in, is
+applied by Traefik v3 to ALL TLS connections that do not name another option. That
+makes this one object the TLS policy for the whole edge -- no per-route wiring, and
+no way for a new route to be added below the floor by omission.
+
+REQUIRES providers.kubernetesCRD to be enabled on the subchart. TLSOption is a
+traefik.io CRD, not a Gateway API type: with the CRD provider off, Traefik never
+watches this object, the manifest applies cleanly, the resource sits in the
+cluster, and the TLS floor silently does not exist. The base values enable that
+provider for exactly this reason.
+
+THE NAMESPACE IS DERIVED, not assumed (1.2.0). Since Traefik v3.7.11 the provider
+setting defaultTLSResourcesNamespace decides which namespace's `default` TLSOption
+counts; left empty, one in ANY namespace does. So the object is placed in exactly
+the namespace that setting names, and the setting is required: the two cannot
+drift apart, whatever namespace the chart is rendered with.
+*/ -}}
+{{- if .Values.tlsOption.enabled }}
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  # MUST be `default` to apply cluster-wide. Any other name only takes effect
+  # where it is explicitly referenced.
+  name: {{ .Values.tlsOption.name }}
+  namespace: {{ required "traefik.providers.kubernetesCRD.defaultTLSResourcesNamespace must be set: without it Traefik honours a `default` TLSOption from any namespace" .Values.traefik.providers.kubernetesCRD.defaultTLSResourcesNamespace }}
+  labels:
+    {{- include "platform-traefik.labels" . | nindent 4 }}
+spec:
+  minVersion: {{ .Values.tlsOption.minVersion }}
+  {{- with .Values.tlsOption.maxVersion }}
+  maxVersion: {{ . }}
+  {{- end }}
+  {{- with .Values.tlsOption.cipherSuites }}
+  # Only consulted for TLS 1.2. TLS 1.3 cipher suites are not negotiable and Go
+  # ignores this list entirely for 1.3 connections.
+  cipherSuites:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tlsOption.curvePreferences }}
+  curvePreferences:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  sniStrict: {{ .Values.tlsOption.sniStrict }}
+{{- end }}

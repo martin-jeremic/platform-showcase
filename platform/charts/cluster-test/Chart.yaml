@@ -1,0 +1,20 @@
+apiVersion: v2
+name: cluster-test
+description: >-
+  Cluster smoke-test app. Stock upstream nginx serves a self-contained HTML page
+  that reports live cluster/pod info (namespace, pod, node, IP), so a new cluster's
+  gateway, TLS and scheduling can be verified end-to-end. No container build and
+  no CI: the page is a ConfigMap rendered at pod start from the Downward API.
+  No public route by default.
+type: application
+# 1.1.0 -- nginx 1.27 -> 1.30.6, the newest release of the current STABLE line
+#   (even minor; odd minors are mainline). The image tag is derived from
+#   appVersion (templates/_helpers.tpl), so this line is the only nginx version.
+#   Still no priorityClassName, deliberately -- see values.yaml.
+version: 1.1.0
+# The nginx version: the image tag is "<appVersion>-<image.variant>".
+appVersion: "1.30.6"
+keywords:
+  - smoke-test
+  - gateway
+  - diagnostics

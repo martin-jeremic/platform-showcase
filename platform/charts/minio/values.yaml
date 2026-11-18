@@ -1,0 +1,49 @@
+# minio -- wrapper values. Minimal on purpose: a placeholder component.
+
+gateway:
+  name: traefik-gateway
+  namespace: traefik
+  # The HTTPS listener only.
+  sectionName: websecure
+
+route:
+  # Per cluster.
+  hostname: ""
+  # Path prefix for the S3 API (port 9000) and the web console (port 9001).
+  apiPath: /minio
+  consolePath: /minio-console
+
+minio:
+  fullnameOverride: minio
+  # Root credentials ONLY from a pre-created Secret (keys rootUser, rootPassword).
+  # The chart this replaced carried `rootPassword: REPLACE_WITH_ROOT_PASSWORD` and an
+  # install script that substituted it from the environment -- a values key that
+  # holds a credential eventually holds a real one.
+  existingSecret: minio-root
+  # Per cluster: MINIO_SERVER_URL / MINIO_BROWSER_REDIRECT_URL, so presigned URLs and
+  # console redirects carry the public path prefixes.
+  environment: {}
+  mode: standalone
+  replicas: 1
+  persistence:
+    enabled: true
+    # Per cluster; never empty.
+    storageClass: ""
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  priorityClassName: system-cluster-critical
+  service:
+    type: ClusterIP
+    port: 9000
+  consoleService:
+    type: ClusterIP
+    port: 9001
+  ingress:
+    enabled: false
+  consoleIngress:
+    enabled: false

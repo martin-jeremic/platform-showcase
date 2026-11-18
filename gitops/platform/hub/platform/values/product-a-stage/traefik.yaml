@@ -1,0 +1,20 @@
+# Single-node cluster: the hard topology spread (DoNotSchedule) would leave every
+# second replica Pending, so this cluster runs one replica of each and no PDB.
+gateway:
+  listeners:
+    websecure:
+      hostname: stage.product-a.example.net
+certificate:
+  dnsNames:
+    - stage.product-a.example.net
+redirect:
+  hostnames:
+    - stage.product-a.example.net
+traefik:
+  service:
+    annotations:
+      metallb.io/loadBalancerIPs: "10.0.0.244"
+  deployment:
+    replicas: 1
+  podDisruptionBudget:
+    enabled: false

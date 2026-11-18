@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) only to override defaults.
+#
+# administrator_login_password is required but INERT (ignore_changes on the server):
+# any placeholder satisfies it until go-live. Pass it as an environment variable,
+# never in this file:
+#   export TF_VAR_administrator_login_password='<from-key-vault>'
+
+# subscription_id = "11111111-1111-1111-1111-111111111111"

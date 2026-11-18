@@ -1,0 +1,40 @@
+mongo "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+  Topology  : standalone mongod ({{ .Values.replicaCount }} replica)
+  Image     : {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+  Service   : {{ include "mongo.fullname" . }}:{{ .Values.service.port }} ({{ .Values.service.type }})
+  Storage   : {{ if .Values.persistence.enabled }}{{ .Values.persistence.size }}{{ if .Values.persistence.storageClass }} on {{ .Values.persistence.storageClass }}{{ else }} on the cluster default StorageClass{{ end }}{{ else }}emptyDir — DATA IS LOST ON RESTART{{ end }}
+  Credential: Secret {{ include "mongo.secretName" . }}, key {{ include "mongo.passwordKey" . }}
+{{- if .Values.azureKeyVault.enabled }}
+              (synced from Azure Key Vault {{ .Values.azureKeyVault.keyvaultName }} via the CSI driver)
+{{- end }}
+
+Connection string for apps inside the cluster:
+  mongodb://{{ .Values.auth.username }}:<password>@{{ include "mongo.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/?authSource={{ .Values.auth.database }}
+
+  • authSource={{ .Values.auth.database }} is required — the {{ .Values.auth.username }} user lives in that database,
+    and omitting it fails with "Authentication failed" even with the right password.
+  • No route, no LoadBalancer: this is reachable only from inside the cluster.
+    For local access: kubectl port-forward svc/{{ include "mongo.fullname" . }} 27017:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+Verify:
+  kubectl -n {{ .Release.Namespace }} get pods,svc,pvc
+{{- if .Values.azureKeyVault.enabled }}
+  kubectl -n {{ .Release.Namespace }} get secretproviderclass {{ .Values.azureKeyVault.secretProviderClassName }}
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.azureKeyVault.syncedSecretName }}
+{{- end }}
+  kubectl -n {{ .Release.Namespace }} exec {{ include "mongo.fullname" . }}-0 -- \
+    mongosh --quiet --eval "db.adminCommand('ping')"
+
+Read the password:
+{{- if .Values.azureKeyVault.enabled }}
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "mongo.secretName" . }} \
+    -o jsonpath="{.data.{{ include "mongo.passwordKey" . }}}" | base64 -d
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "mongo.secretName" . }} \
+    -o jsonpath="{.data.mongo-password}" | base64 -d
+{{- end }}
+
+Changing the password is NOT a values change. MONGO_INITDB_ROOT_PASSWORD only applies to
+  an empty data directory, so editing it here (or in Key Vault) and restarting does nothing
+  to an initialized database. Use db.changeUserPassword() first -- see the platform/charts README (mongo).

@@ -1,0 +1,7 @@
+# Issuer https://dev.example.com/k8s-issuer -- equal, byte for byte, to the FIRST
+# --service-account-issuer flag of this node's kube-apiserver.
+gateway:
+  name: traefik-gateway
+  namespace: traefik
+route:
+  hostname: dev.example.com

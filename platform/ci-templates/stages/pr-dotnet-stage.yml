@@ -1,0 +1,155 @@
+# stages/pr-dotnet-stage.yml
+#
+# PR gate for a .NET service: locked restore, build, the named test suites, the EF Core
+# pending-model-changes guard, coverage, and (optionally) hadolint + a Trivy filesystem scan.
+#
+# Only HERMETIC suites belong here: suites that need nothing but the build. Two kinds were taken
+# out of PR pipelines on purpose and run in a nightly pipeline instead (see
+# ../examples/e2e-nightly.yml for the shape):
+#   - integration suites that connect to a database on localhost (no build agent has one);
+#   - architecture-rule suites (~8 minutes and ~6 GB per run: two at once on the shared build
+#     machine crashed one test host and made the other agent stop answering).
+#
+# `--locked-mode` makes restore fail when packages.lock.json does not match the project files, so
+# a dependency cannot change without the lock file change being reviewed in the same PR.
+#
+# The EF guard is DB-free: `dotnet ef migrations has-pending-model-changes` compares the model to
+# the last migration's snapshot and fails if a model change was committed without its migration.
+# The services migrate at deploy time (migration Job chart), so a missing migration would
+# otherwise surface as a runtime error in dev.
+#
+# Coverage uses the VSTest collector (`--collect "XPlat Code Coverage"`, package
+# coverlet.collector). Do not pass coverlet.msbuild properties (/p:CollectCoverage,
+# /p:Threshold) with the collector package: they are silently ignored, no report is produced,
+# and a gate configured that way measured nothing for months. failIfCoverageEmpty makes that
+# failure loud.
+
+parameters:
+  - name: stageName
+    type: string
+    default: Build
+  - name: dependsOn
+    type: object
+    default: []
+  - name: solution
+    type: string
+  # Test projects to run, relative to the repo root. [] builds only.
+  - name: suites
+    type: object
+    default: []
+  # Optional `dotnet test --filter`, e.g. "Category!=RequiresDocker". Exclusions are explicit,
+  # never --passWithNoTests: a glob that matches nothing must fail, not go green.
+  - name: testFilter
+    type: string
+    default: ''
+  # EF Core guards: [{ project, startupProject, context }]. Requires dotnet-ef as a local tool
+  # (.config/dotnet-tools.json).
+  - name: efGuards
+    type: object
+    default: []
+  - name: collectCoverage
+    type: boolean
+    default: true
+  - name: buildConfiguration
+    type: string
+    default: Release
+  # Optional: lint and scan this Dockerfile and its folder (warn-only).
+  - name: dockerfile
+    type: string
+    default: ''
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: .NET build and tests
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: BuildAndTest
+        displayName: dotnet restore / build / test
+        pool: ${{ parameters.pool }}
+        variables:
+          DOTNET_NOLOGO: true
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: UseDotNet@2
+            displayName: .NET SDK pinned by global.json
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+
+          - bash: dotnet restore "$SOLUTION" --locked-mode
+            displayName: Restore (locked)
+            env:
+              SOLUTION: ${{ parameters.solution }}
+
+          - bash: dotnet build "$SOLUTION" --configuration "$CONFIGURATION" --no-restore
+            displayName: Build
+            env:
+              SOLUTION: ${{ parameters.solution }}
+              CONFIGURATION: ${{ parameters.buildConfiguration }}
+
+          # One step per suite, so the run page shows which suite failed. The arguments are a bash
+          # array, not a folded YAML scalar: a `#` inside `arguments: >` is not a comment, and a
+          # "commented" line there was once passed to dotnet as literal command-line text.
+          - ${{ each suite in parameters.suites }}:
+            - bash: |
+                set -euo pipefail
+                ARGS=(--configuration "$CONFIGURATION" --no-build --logger trx --results-directory "$AGENT_TEMPDIRECTORY/TestResults")
+                [ -z "$TEST_FILTER" ] || ARGS+=(--filter "$TEST_FILTER")
+                [ "${COLLECT,,}" != "true" ] || ARGS+=(--collect "XPlat Code Coverage")
+                dotnet test "$SUITE" "${ARGS[@]}"
+              displayName: Test ${{ suite }}
+              env:
+                SUITE: ${{ suite }}
+                CONFIGURATION: ${{ parameters.buildConfiguration }}
+                TEST_FILTER: ${{ parameters.testFilter }}
+                COLLECT: ${{ parameters.collectCoverage }}
+
+          - ${{ each guard in parameters.efGuards }}:
+            - bash: |
+                set -euo pipefail
+                dotnet tool restore
+                dotnet ef migrations has-pending-model-changes \
+                  --project "$EF_PROJECT" --startup-project "$EF_STARTUP" --context "$EF_CONTEXT" \
+                  --configuration "$CONFIGURATION" --no-build
+              displayName: 'EF: no pending model changes (${{ guard.context }})'
+              env:
+                EF_PROJECT: ${{ guard.project }}
+                EF_STARTUP: ${{ coalesce(guard.startupProject, guard.project) }}
+                EF_CONTEXT: ${{ guard.context }}
+                CONFIGURATION: ${{ parameters.buildConfiguration }}
+
+          - ${{ if gt(length(parameters.suites), 0) }}:
+            - task: PublishTestResults@2
+              displayName: Publish test results
+              condition: succeededOrFailed()
+              inputs:
+                testResultsFormat: VSTest
+                testResultsFiles: $(Agent.TempDirectory)/TestResults/**/*.trx
+                mergeTestResults: true
+                failTaskOnFailedTests: true
+                testRunTitle: PR $(Build.SourceBranchName)
+
+            - ${{ if parameters.collectCoverage }}:
+              - task: PublishCodeCoverageResults@2
+                displayName: Publish coverage
+                condition: succeededOrFailed()
+                inputs:
+                  summaryFileLocation: $(Agent.TempDirectory)/TestResults/**/coverage.cobertura.xml
+                  failIfCoverageEmpty: true
+
+          - ${{ if ne(parameters.dockerfile, '') }}:
+            - template: ../steps/hadolint-steps.yml
+              parameters:
+                dockerfile: ${{ parameters.dockerfile }}
+            - template: ../steps/trivy-scan-steps.yml
+              parameters:
+                scanType: fs
+                scanPath: ${{ replace(parameters.dockerfile, '/Dockerfile', '') }}
+                reportName: pr-${{ parameters.stageName }}

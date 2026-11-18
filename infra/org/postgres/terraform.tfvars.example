@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (git-ignored) only to override defaults.
+#
+# The admin password is NOT set here. Export it from the vault:
+#   export TF_VAR_administrator_password="$(az keyvault secret show \
+#     --vault-name kv-org-prod --name postgres--admin--password --query value -o tsv)"
+#
+# Firewall: the committed default tracks the live rules. Never override with a
+# smaller map -- apply would destroy live rules. To add your IP, copy the FULL
+# default and append (documentation ranges shown):
+# firewall_rules = {
+#   "aks-org-prod-egress"                = { start_ip_address = "192.0.2.40", end_ip_address = "192.0.2.40" }
+#   "office"                             = { start_ip_address = "203.0.113.10", end_ip_address = "203.0.113.10" }
+#   "ClientIPAddress_2025-1-15_10-12-33" = { start_ip_address = "198.51.100.23", end_ip_address = "198.51.100.23" }
+#   "my-laptop"                          = { start_ip_address = "198.51.100.77", end_ip_address = "198.51.100.77" }
+# }
+
+# allowed_extensions = ["PGCRYPTO", "PG_TRGM", "UNACCENT", "VECTOR"]   # APPEND

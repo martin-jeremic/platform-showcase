@@ -1,0 +1,9 @@
+# Chart-version pin for product-a-db (prod), read by the ApplicationSet git-files generator.
+# .chart.version is written by the approval-gated promotion. Any OTHER top-level key
+# (e.g. syncPolicy) is hand-maintained and preserved across promotions.
+chart:
+  version: "1.8.1"
+# No syncPolicy here: prod is manual for every app, so the migration Job runs when someone syncs
+# it (first, before product-a-api). When prod is re-armed, add the same opt-out stage carries:
+#   syncPolicy: { automated: { prune: true, selfHeal: false } }
+# Without it the re-arm would put this Job chart under selfHeal.

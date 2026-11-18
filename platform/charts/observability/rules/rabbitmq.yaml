@@ -1,0 +1,88 @@
+# RabbitMQ broker alerts.
+#
+# Scrape prerequisite: the rabbitmq chart with metrics.enabled (port 15692,
+# per-object metrics, ServiceMonitor). The job label is PINNED to `rabbitmq` by
+# that chart's ServiceMonitor -- NOT left to the operator default (the Service
+# name), which on aks-product-a-demo is the adopted legacy release's name. Agent
+# spokes use the same job (cluster-monitoring-agent metrics.rabbitmq.jobName).
+# A wrong job= never fires and never errors, so
+# read it from live Prometheus before flipping prometheusRules.files.rabbitmq:
+#   curl -s 'http://localhost:9090/api/v1/label/job/values' | grep rabbit
+#
+# PlatformRabbitMQDown is PER CLUSTER, in the shape of rules/spokes.yaml:
+# `max_over_time(x[7d]) unless x == 1`, by cluster. A cluster that had a broker
+# target in the last 7 days but has no healthy scrape now fires -- broker down AND
+# target gone (endpoints went with the pod) alike, the two shapes the old
+# absent(up{...} == 1) covered. absent() is one answer for the whole Prometheus,
+# though, and the hub holds several clusters' brokers (product-a-stage's via its
+# agent, hub-dev's own): one healthy broker hid every other one being down.
+# A cluster that never ran a broker never fires; one whose broker is removed on
+# purpose stops firing after 7 days.
+#
+# The queue rules need per-object metrics (prometheus.return_per_object_metrics,
+# rabbitmq metrics.perObjectMetrics); without them rabbitmq_queue_* are
+# broker-wide totals with no `queue` label.
+#
+# CLUSTER-AWARE: see rules/workload.yaml.
+#
+# Ported from the product lineage of this chart, made cluster-aware. The
+# unroutable rule sums by cluster: per-object metrics label channel counters per
+# channel, and one alert per AMQP channel is noise.
+groups:
+  - name: platform.rabbitmq
+    rules:
+      - alert: PlatformRabbitMQDown
+        expr: |
+          max by (cluster) (max_over_time(up{job="rabbitmq"}[7d]))
+          unless
+          max by (cluster) (up{job="rabbitmq"} == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ is down on {{ $labels.cluster }}"
+          description: >-
+            No healthy scrape of job rabbitmq on {{ $labels.cluster }} for 5m
+            -- the broker is down or unreachable, and everything on its queues is
+            stalled.
+
+      - alert: PlatformRabbitMQQueueNoConsumers
+        expr: |
+          rabbitmq_queue_messages_ready > 0
+          and rabbitmq_queue_consumers == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue {{ $labels.queue }} has backlog and no consumers"
+          description: >-
+            Queue {{ $labels.vhost }}/{{ $labels.queue }} on {{ $labels.cluster }} has
+            {{ $value }} ready messages and zero consumers for 15m. The consuming
+            service is down or disconnected.
+
+      - alert: PlatformRabbitMQQueueBacklogGrowing
+        expr: |
+          sum by (cluster, vhost, queue) (rabbitmq_queue_messages_ready) > 100
+          and sum by (cluster, vhost, queue) (delta(rabbitmq_queue_messages_ready[30m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue {{ $labels.queue }} backlog growing"
+          description: >-
+            Queue {{ $labels.vhost }}/{{ $labels.queue }} on {{ $labels.cluster }}:
+            ready-message count has been above 100 and growing for 30m. Consumers are
+            not keeping up with producers.
+
+      - alert: PlatformRabbitMQUnroutableMessages
+        expr: |
+          sum by (cluster) (increase(rabbitmq_channel_messages_unroutable_dropped_total[15m])) > 0
+          or sum by (cluster) (increase(rabbitmq_channel_messages_unroutable_returned_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "RabbitMQ has unroutable messages"
+          description: >-
+            Publishers on {{ $labels.cluster }} produced unroutable messages in the last
+            15m ({{ $value }}). An exchange/binding is missing or a routing key is
+            wrong; dropped ones are LOST.

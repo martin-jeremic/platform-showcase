@@ -1,0 +1,40 @@
+{{- include "rbac.validate" . -}}
+{{- /*
+One RoleBinding per namespace, binding an Entra group to a BUILT-IN ClusterRole.
+
+Built-in roles are referenced, never redefined — `edit` already means exactly
+"full working access without the ability to hand out access", which is the line
+this model draws. The only ClusterRole this chart defines is the namespace lister.
+
+Named `entra-<role>` rather than after the group: RoleBindings are namespaced, so
+the name only has to be unique within the namespace, and `entra-edit` reads far
+better in `kubectl get rolebinding -n product-a` than a raw GUID would. The group's
+display name rides along as an annotation so the binding stays legible.
+
+Unlike Namespaces these ARE prunable — removing an entry from values must actually
+revoke access, not orphan the binding.
+*/ -}}
+{{- range .Values.namespaces }}
+{{- $role := .role | default "edit" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: entra-{{ $role }}
+  namespace: {{ .name }}
+  labels:
+    {{- include "rbac.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    example.com/entra-group: {{ .entraGroupName | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $role }}
+subjects:
+  {{- /* kind: Group + the object ID is the only subject form AKS honours — the
+         token carries group GUIDs and never display names. */}}
+  - kind: Group
+    name: {{ .entraGroupId | quote }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}

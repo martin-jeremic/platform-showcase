@@ -1,0 +1,21 @@
+# Single-node cluster: the hard topology spread (DoNotSchedule) would leave every
+# second replica Pending, so this cluster runs one replica of each and no PDB.
+gateway:
+  listeners:
+    websecure:
+      hostname: services.example.com
+certificate:
+  dnsNames:
+    - services.example.com
+redirect:
+  hostnames:
+    - services.example.com
+traefik:
+  service:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-resource-group: rg-org-prod-network
+      service.beta.kubernetes.io/azure-pip-name: pip-org-prod-edge
+  deployment:
+    replicas: 1
+  podDisruptionBudget:
+    enabled: false

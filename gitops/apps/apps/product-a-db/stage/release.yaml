@@ -1,0 +1,11 @@
+# Chart-version pin for product-a-db (stage), read by the ApplicationSet git-files generator.
+# .chart.version is written by the approval-gated promotion. Any OTHER top-level key
+# (e.g. syncPolicy) is hand-maintained and preserved across promotions.
+chart:
+  version: "1.8.2"
+# Per-app opt-out, read by the appset templatePatch: selfHeal on a Job chart re-creates a
+# completed-and-cleaned-up migration Job, i.e. re-runs DDL on Argo's schedule instead of on a
+# promotion. prune stays on (the default).
+syncPolicy:
+  automated:
+    selfHeal: false

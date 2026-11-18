@@ -1,0 +1,91 @@
+{
+  "uid": "product-a-ingest-rate",
+  "title": "Product A / Ingest rate",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "product-a",
+    "logs"
+  ],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "description": "New inbound messages per minute, from product-a-module's own log line. The red line is the threshold of PlatformInboundRateHigh (observability-log-rules log-rules/ingest-rate.yaml); tools/check-dashboard-threshold.py fails CI when the two numbers differ.",
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "query": {
+          "label": "cluster",
+          "refId": "cluster",
+          "type": 1,
+          "stream": ""
+        },
+        "definition": "label_values(cluster)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "label": "Cluster"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Inbound messages per minute",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (cluster) (count_over_time({service_name=\"product-a-module\", cluster=~\"$cluster\"} |= \"Ingested message=\" [1m]))",
+          "legendFormat": "{{cluster}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

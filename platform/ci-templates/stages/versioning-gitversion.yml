@@ -1,0 +1,117 @@
+# stages/versioning-gitversion.yml
+#
+# Versioning stage for repositories that version with GitVersion (the .NET and product-a
+# services). Mainline mode, bumps from commit messages, develop = alpha prerelease. A sample
+# configuration is in ../examples/GitVersion.yml.
+#
+# OUTPUT CONTRACT (identical in versioning-semantic-release.yml, so callers can swap them):
+#   stage Versioning / job SemanticVersioning / step DetermineVersion
+#     nextVersion     the version for this run (always set here; GitVersion always has one)
+#     isReleaseReady  'true' only on the release branch when there are commits since the last
+#                     version source; 'false' otherwise
+#   Read them as
+#     $[ stageDependencies.Versioning.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+#     dependencies.Versioning.outputs['SemanticVersioning.DetermineVersion.isReleaseReady']
+#
+# fetchDepth: 0 + fetchTags are not optional. GitVersion walks history and tags; a shallow clone
+# makes it fail ("The repository is shallow") or, worse in Mainline mode, compute a version from
+# the few commits it can see.
+
+parameters:
+  - name: gitVersionConfig
+    type: string
+    default: GitVersion.yml
+  - name: gitVersionSpec
+    type: string
+    default: '6.3.x'
+  - name: releaseBranch
+    type: string
+    default: refs/heads/main
+  # Tag the release commit with the version (needs Contribute + Create tag for the build identity).
+  - name: createTag
+    type: boolean
+    default: true
+  - name: dependsOn
+    type: object
+    default: []
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: Versioning
+    displayName: Determine version
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: SemanticVersioning
+        displayName: GitVersion
+        pool: ${{ parameters.pool }}
+        variables:
+          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: true
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            fetchTags: true
+
+          - task: gitversion-setup@4
+            displayName: Install GitVersion ${{ parameters.gitVersionSpec }}
+            inputs:
+              versionSpec: ${{ parameters.gitVersionSpec }}
+
+          - task: gitversion-execute@4
+            name: GitVersion
+            displayName: Calculate version
+            inputs:
+              configFilePath: ${{ parameters.gitVersionConfig }}
+
+          - bash: |
+              set -euo pipefail
+              if [ -z "$NEXT_VERSION" ]; then
+                echo "##vso[task.logissue type=error]GitVersion produced no version. Is the clone shallow?"
+                exit 1
+              fi
+              READY=false
+              if [ "$CURRENT_BRANCH" = "$RELEASE_BRANCH" ] && [ "${COMMITS_SINCE:-0}" -gt 0 ]; then
+                READY=true
+              fi
+              echo "Version $NEXT_VERSION on $CURRENT_BRANCH ($COMMITS_SINCE commit(s) since the version source); release ready: $READY"
+              echo "##vso[task.setvariable variable=nextVersion;isOutput=true]$NEXT_VERSION"
+              echo "##vso[task.setvariable variable=isReleaseReady;isOutput=true]$READY"
+            name: DetermineVersion
+            displayName: Determine version outputs
+            env:
+              NEXT_VERSION: $(GitVersion.SemVer)
+              COMMITS_SINCE: $(GitVersion.CommitsSinceVersionSource)
+              CURRENT_BRANCH: $(Build.SourceBranch)
+              RELEASE_BRANCH: ${{ parameters.releaseBranch }}
+
+          - ${{ if parameters.createTag }}:
+            - bash: |
+                set -euo pipefail
+                if git rev-parse -q --verify "refs/tags/$VERSION" > /dev/null; then
+                  echo "Tag $VERSION already exists; nothing to do."
+                  exit 0
+                fi
+                git -c user.name=ci-bot -c user.email=ci-bot@example.com tag -a "$VERSION" -m "Release $VERSION"
+                git -c http.extraheader="AUTHORIZATION: bearer $SYSTEM_ACCESSTOKEN" push origin "refs/tags/$VERSION"
+              displayName: Tag release $(DetermineVersion.nextVersion)
+              condition: and(succeeded(), eq(variables['DetermineVersion.isReleaseReady'], 'true'))
+              env:
+                VERSION: $(DetermineVersion.nextVersion)
+                SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+      # The run is named after the version, so a CD pipeline triggered by this run can read it
+      # back as resources.pipeline.<alias>.runName.
+      - job: SetBuildNumber
+        displayName: Name the run after the version
+        dependsOn: SemanticVersioning
+        pool: ${{ parameters.pool }}
+        variables:
+          newVersion: $[ dependencies.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+        steps:
+          - checkout: none
+          - bash: echo "##vso[build.updatebuildnumber]$NEW_VERSION"
+            displayName: Update build number
+            env:
+              NEW_VERSION: $(newVersion)

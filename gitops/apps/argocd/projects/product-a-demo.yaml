@@ -1,0 +1,53 @@
+# AppProject product-a-demo: tenancy + RBAC boundary for the demo Applications on the hub
+# (spoke aks-product-a-demo, namespace product-a-demo). appsets/product-a-demo.yaml puts every
+# Application it generates into this project.
+#
+# sync-wave -1: the root app applies the AppProjects before the ApplicationSets (wave 0); the
+# ApplicationSet controller skips any Application whose project does not exist yet.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: product-a-demo
+  namespace: argocd-hub
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    app.kubernetes.io/part-of: product-a
+spec:
+  description: product-a services on spoke aks-product-a-demo, namespace product-a-demo
+  sourceRepos:
+    # This GitOps repo ($values).
+    - https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+    # The OCI Helm registry (charts). Must ALSO be registered as a Helm repository with
+    # enableOCI: "true" (setup/repo-helm-acr.yaml).
+    - productacr.azurecr.io/helm
+  destinations:
+    - name: aks-product-a-demo
+      namespace: product-a-demo
+  # The application charts render nothing cluster-scoped. Namespace is allowed only because
+  # syncOptions carries CreateNamespace=true; without it the first sync fails on a permission
+  # error that reads like a bug. A chart that ever needs a cluster-scoped kind gets it added here
+  # deliberately, which beats a chart quietly creating a ClusterRoleBinding nobody reviewed.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  roles:
+    # Argo CD derives `p, proj:product-a-demo:developer, projects, get, ...` and one
+    # `g, <group>, proj:product-a-demo:developer` line per group itself.
+    # The subject must be proj:product-a-demo:developer and the object product-a-demo/*.
+    # ONE MALFORMED LINE DISABLES EVERY POLICY OF THIS PROJECT (argocd-server logs "Failed to load
+    # casbin policies"), and nothing validates it on sync: check with
+    #   argocd admin settings rbac validate --policy-file <file>
+    # before merging a change here.
+    - name: developer
+      description: Read, sync, resource actions (e.g. restart) and pod logs. No edit, delete or create.
+      groups:
+        - argocd-product-a-demo   # Keycloak realm org-test; membership is managed in Keycloak, never in Git
+      policies:
+        - p, proj:product-a-demo:developer, applications, get, product-a-demo/*, allow
+        - p, proj:product-a-demo:developer, applications, sync, product-a-demo/*, allow
+        - p, proj:product-a-demo:developer, applications, action/*, product-a-demo/*, allow
+        - p, proj:product-a-demo:developer, logs, get, product-a-demo/*, allow

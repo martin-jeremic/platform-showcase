@@ -1,0 +1,210 @@
+# =============================================================================
+# cluster-monitoring-agent -- DEFAULT values (single OTLP egress + mTLS)
+#
+# This cluster collects metrics/logs/traces and ships them through ONE OTLP
+# endpoint on the hub (observability-ingest), secured with a client certificate
+# (mTLS). No per-backend endpoints and no OAuth2 -- identity is the client cert.
+#
+# This file holds the MECHANISM only and names no cluster. Identity, the hub
+# endpoint, where the mTLS bundle comes from, what else to scrape, tolerations and
+# sizing are empty or off here; every cluster fact lives in that cluster's gitops
+# values. A cluster that leaves a required fact out fails the render
+# (templates/assertions.yaml, templates/configmap.yaml).
+#
+# Helm REPLACES lists wholesale (maps deep-merge): cluster values that change one
+# element of a list restate the whole list. The one list they are EXPECTED to
+# restate is alloy.controller.volumes.extra (see mtls below).
+# =============================================================================
+
+global:
+  # The cluster label attached to every metric/log/trace. MUST be unique and MUST
+  # equal the CN of this cluster's client certificate -- the spokeClients[].name
+  # the hub mints it under (observability-ingest). Required.
+  cluster: ""
+
+hub:
+  otlp:
+    # grpc: "host:4317" (no scheme)   http: "https://host:4318". Required.
+    # MUST be a SAN on the hub gateway's server cert
+    # (observability-ingest pki.server.dnsNames / ipAddresses).
+    endpoint: ""
+    # "grpc" -> otelcol.exporter.otlp ; "http" -> otelcol.exporter.otlphttp
+    protocol: grpc
+    insecureSkipVerify: false
+
+# -----------------------------------------------------------------------------
+# mtls -- the client certificate this cluster presents to the hub, and the hub CA
+# it verifies the gateway with. Alloy reads them at /etc/alloy/tls (client.crt,
+# client.key, ca.crt). `source` says where they come from. Required.
+#
+#   keyVault        templates/secretproviderclass.yaml renders SecretProviderClass
+#                   cluster-monitoring-agent-hub-tls, and the cluster values
+#                   RESTATE alloy.controller.volumes.extra as the CSI volume:
+#                     volumes:
+#                       extra:
+#                         - name: hub-tls
+#                           csi:
+#                             driver: secrets-store.csi.k8s.io
+#                             readOnly: true
+#                             volumeAttributes:
+#                               secretProviderClass: cluster-monitoring-agent-hub-tls
+#                             # servicePrincipal ONLY -- and then it is required:
+#                             # nodePublishSecretRef: {name: secrets-store-creds}
+#   existingSecret  a Secret created out of band (keys client.crt, client.key,
+#                   ca.crt) -- the base volume below, for a push-installed spoke.
+# -----------------------------------------------------------------------------
+mtls:
+  source: ""
+  existingSecret: cluster-monitoring-agent-hub-tls
+  keyVault:
+    keyvaultName: ""
+    tenantId: ""
+    # workloadIdentity (default) | vmManagedIdentity | servicePrincipal.
+    # workloadIdentity also needs alloy.serviceAccount.annotations
+    # [azure.workload.identity/client-id] and alloy.controller.podLabels
+    # [azure.workload.identity/use] -- both checked by assertions.yaml.
+    authMode: workloadIdentity
+    kubeletClientId: ""    # vmManagedIdentity only
+    # Vault objects: <objectPrefix>--client-crt, --client-key, --ca-crt.
+    objectPrefix: cluster-monitoring-agent
+
+metrics:
+  enabled: true
+  scrapeInterval: "60s"
+  # Also scrape pods carrying prometheus.io/scrape annotations.
+  scrapeAnnotatedPods: true
+
+  # Explicit scrape for a RabbitMQ broker. Its pod carries no prometheus.io/*
+  # annotations and its Service does not expose the metrics port, so the
+  # annotated-pods scrape cannot find it. Off here; a cluster that runs a broker
+  # sets namespace, podLabelSelector and jobName (all three required).
+  #
+  # jobName is the `job` label on every rabbitmq_* series at the hub. The hub's
+  # rules/rabbitmq.yaml selects job="rabbitmq", the name the rabbitmq chart pins.
+  rabbitmq:
+    enabled: false
+    namespace: ""
+    podLabelSelector: ""
+    jobName: ""
+    port: 15692
+    # per-object exposes per-queue series (queue/vhost labels).
+    path: /metrics/per-object
+
+  # Explicit scrape for the trivy release (Trivy Operator): a static target on the
+  # operator's headless Service, port 8080 -- NOT the annotated-pods scrape, whose
+  # namespace stamp would push each series' own `namespace` (the SCANNED
+  # workload's) to exported_namespace. The job label at the hub is `trivy`.
+  trivy:
+    enabled: false
+    serviceName: ""
+    namespace: ""
+
+logs:
+  enabled: true
+
+traces:
+  enabled: true
+  otlp:
+    grpcPort: 4317         # apps in this cluster send traces here
+    httpPort: 4318
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+  # Service name Alloy scrapes -- must match kube-state-metrics.fullnameOverride.
+  serviceName: kube-state-metrics
+
+# ---- Grafana Alloy -----------------------------------------------------------
+alloy:
+  enabled: true
+
+  controller:
+    type: daemonset
+    # Per-node DaemonSet: the node tier of the production floor.
+    priorityClassName: system-node-critical
+    # Per cluster: tolerations for tainted nodes the DaemonSet must still cover.
+    tolerations: []
+    # Per cluster when authMode is workloadIdentity: azure.workload.identity/use.
+    podLabels: {}
+    # The volume behind /etc/alloy/tls: the mtls.source=existingSecret shape. A
+    # keyVault cluster restates the list as the CSI volume (see mtls above).
+    volumes:
+      extra:
+        - name: hub-tls
+          secret:
+            secretName: cluster-monitoring-agent-hub-tls
+
+  serviceAccount:
+    create: true
+    # Fixed name -- referenced by this chart's ClusterRoleBinding (rbac.yaml) and by
+    # the federated credential's subject.
+    name: cluster-monitoring-agent
+    annotations: {}
+
+  # This chart ships a broader ClusterRole (nodes/proxy, pods/log, ...) bound to the
+  # SA above, so the subchart's own RBAC is disabled.
+  rbac:
+    create: false
+
+  alloy:
+    # The pipeline comes from this chart's ConfigMap (templates/configmap.yaml).
+    configMap:
+      create: false
+      name: cluster-monitoring-agent-alloy-config
+      key: config.alloy
+    # Logs are read via the Kubernetes API (loki.source.kubernetes), so no host
+    # /var/log mount is needed.
+    mounts:
+      varlog: false
+      # The mTLS bundle, whatever its source (the paths the config reads).
+      extra:
+        - name: hub-tls
+          mountPath: /etc/alloy/tls
+          readOnly: true
+    # The OTLP receiver ports on the Alloy Service, so apps can send traces to
+    # <release>-alloy:4317 / :4318.
+    extraPorts:
+      - name: otlp-grpc
+        port: 4317
+        targetPort: 4317
+        protocol: TCP
+      - name: otlp-http
+        port: 4318
+        targetPort: 4318
+        protocol: TCP
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# ---- node-exporter -----------------------------------------------------------
+prometheus-node-exporter:
+  fullnameOverride: node-exporter
+  # Pods keep the label app.kubernetes.io/name=prometheus-node-exporter, which is
+  # how Alloy discovers them (independent of fullnameOverride).
+  priorityClassName: system-node-critical
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+# ---- kube-state-metrics ------------------------------------------------------
+kube-state-metrics:
+  # Must match kubeStateMetrics.serviceName above.
+  fullnameOverride: kube-state-metrics
+  priorityClassName: system-cluster-critical
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

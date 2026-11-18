@@ -1,0 +1,30 @@
+# Registers THIS repository with the hub Argo CD (git-files generator + $values source).
+#
+# NO CREDENTIAL HERE, on purpose. A repository Secret without username/password inherits the
+# credential of the matching repo-creds template (gitops/platform: a template for
+# https://dev.azure.com/example-org/ that authenticates with Entra workload identity). The
+# repo-server gets a short-lived token; nothing is stored and nothing expires. It replaced a
+# personal access token whose expiry once froze every Application in this repository at once.
+# Adding a username/password back would silently switch this repository to that credential again.
+#
+# The `url` MUST match the repoURL in root-application.yaml and the appset exactly.
+#
+# ONE-TIME and UNMANAGED: not listed in ../kustomization.yaml, so no prune can delete it.
+#
+# Apply with REPLACE, not apply:
+#   kubectl -n argocd-hub replace -f repo-git-services-gitops.yaml
+# `kubectl apply` performs a three-way merge: the old token would stay in the live Secret's data
+# (a key absent from the new manifest is only removed if last-applied listed it) and in its
+# kubectl.kubernetes.io/last-applied-configuration annotation. `replace` writes exactly this
+# object.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-services-gitops
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: git
+  url: https://dev.azure.com/example-org/platform/_git/services-gitops

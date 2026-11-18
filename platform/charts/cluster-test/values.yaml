@@ -1,0 +1,137 @@
+# =============================================================================
+# cluster-test -- BASE values
+# =============================================================================
+# A throwaway smoke-test workload: stock nginx serves one HTML page at
+# `welcomePath` that prints live cluster/pod info. Hitting it through the shared
+# Traefik gateway proves DNS -> LB -> Gateway -> TLS -> Service -> Pod all work.
+#
+# No custom image is built. The page is a ConfigMap template rendered at pod
+# start by a tiny `envsubst` init container that reads the Downward API, so the
+# page shows the *real* pod/node/namespace that served the request. Refreshing
+# (or curling repeatedly) lands on different pods -> you can watch it balance.
+#
+# Layer an environment file on top of this base:
+#
+#   helm upgrade --install cluster-test . \
+#     --namespace cluster-test --create-namespace \
+#     -f values.yaml -f <gitops>/platform/values/<cluster>/cluster-test.yaml
+# =============================================================================
+
+# -- Override the generated resource base name (defaults to the chart name).
+nameOverride: ""
+fullnameOverride: "cluster-test"
+
+# -- Extra labels stamped on every resource this chart renders.
+commonLabels: {}
+
+# -- How many pods. >1 makes the load-balancing check meaningful (each pod
+#    renders its own identity, so refreshing shows different Pod/Node values).
+replicaCount: 2
+
+image:
+  # Stock, non-root upstream nginx. Listens on 8080 as uid 101 and ships the
+  # `envsubst` binary this chart's init container uses. No build needed.
+  repository: nginxinc/nginx-unprivileged
+  # Empty = "<Chart.yaml appVersion>-<variant>" (1.1.0). The nginx version lives
+  # in appVersion only; until 1.1.0 it was also written out here, two literals
+  # that had to be bumped together.
+  tag: ""
+  variant: alpine
+  pullPolicy: IfNotPresent
+
+# -- URL path the welcome page is served at. This is BOTH the nginx location and
+#    the HTTPRoute PathPrefix match, so keep them in sync by changing it here.
+welcomePath: /welcome
+
+# -- Shown on the page so you can tell at a glance which cluster answered. Per
+#    cluster (gitops values).
+clusterName: "unset"
+
+service:
+  type: ClusterIP
+  # Port the Service publishes (and the HTTPRoute backendRef targets).
+  port: 80
+  # Container port nginx-unprivileged listens on.
+  targetPort: 8080
+
+# -----------------------------------------------------------------------------
+# HTTPRoute onto the shared Traefik gateway (see the traefik chart). The gateway
+# terminates TLS centrally with its multi-SAN cert; this route just attaches by
+# host + path. The backend Service is in THIS release's namespace, so no
+# ReferenceGrant is needed. Enable per environment and set a hostname the
+# gateway's certificate actually covers.
+# -----------------------------------------------------------------------------
+# NO PUBLIC ROUTE IN PRODUCTION: off by default, switched on per non-prod cluster.
+#
+# Two reasons. First, the production host's `/` is reserved for the application
+# UI service and every other path is a real platform surface -- publishing an nginx welcome
+# page on the production host is not a smoke test worth its blast radius. Second,
+# this page deliberately prints namespace, pod name, node name and pod IP: useful
+# internal diagnostics, gratuitous disclosure on a public endpoint.
+#
+# Test from inside the cluster instead -- see the overlay for the port-forward and
+# in-cluster curl that prove the same path without exposing anything.
+httpRoute:
+  enabled: false
+  gateway:
+    name: traefik-gateway
+    namespace: traefik
+    # Attach to the HTTPS listener so traffic is TLS-terminated at the gateway.
+    sectionName: websecure
+  # Hostnames the route answers for. MUST be covered by the gateway cert.
+  #   e.g. [demo.product-a.example.net] on the AKS demo cluster.
+  hostnames: []
+  # Extra fields merged verbatim into the single rule (e.g. filters, timeouts).
+  extraRule: {}
+
+# Small footprint -- this is a diagnostic, not a workload.
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+# nginx-unprivileged already runs as a non-root user (uid 101) on port 8080.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # Left writable: the unprivileged nginx writes its pid + temp files under the
+  # image. Flip to true only if you also add emptyDir mounts for /tmp + cache.
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# Probes hit the cheap /healthz location (always 200, no page dependency).
+probes:
+  enabled: true
+
+# The `worker` pool, per the component plan. Note this is the ONE chart with no
+# toleration: worker is the only untainted pool, so a nodeSelector alone schedules.
+# Every other platform chart targets a tainted pool and needs both.
+nodeSelector:
+  pool: worker
+tolerations: []
+affinity: {}
+
+# Deliberately NO priorityClassName. This is the one component that SHOULD be
+# evicted first under node pressure -- it is a diagnostic, and preempting it to
+# make room for real work is correct behaviour.
+# HARD spread, not the source chart's ScheduleAnyway. For this chart in
+# particular, soft spread makes the tool LIE: the whole point is to show requests
+# landing on different nodes, and with a soft constraint both replicas can sit on
+# one node and the page reports the same node every refresh -- looking like a
+# load-balancing problem when it is a scheduling one.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: cluster-test

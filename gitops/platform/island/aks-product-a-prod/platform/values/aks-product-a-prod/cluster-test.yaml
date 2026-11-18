@@ -1,0 +1,2 @@
+# No public route on production (chart default); test in-cluster.
+clusterName: aks-product-a-prod

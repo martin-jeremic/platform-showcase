@@ -1,0 +1,58 @@
+# Listed by ../catalog-info.yaml. Kept outside src/Api so a catalog edit never triggers that CI.
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: product-a-api
+  title: Platform API
+  description: >-
+    ASP.NET Core API: tenants, members, cases, operator review, MCP tool host for the modules,
+    and push notifications. Routed under /admin/api.
+  tags: [dotnet, aspnetcore]
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: product-a/product-a
+    dev.azure.com/build-definition: product-a-api-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/product-a/_git/product-a?path=/src/Api
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-a-api
+    argocd/app-selector: example.com/service=product-a-api
+    key-vault/secret-prefix: product-a-api--secret--
+spec:
+  type: service
+  lifecycle: production
+  owner: product-a-team
+  system: product-a
+  dependsOn:
+    - resource:product-a-database
+    - resource:product-a-message-bus
+    - resource:product-a-blob-storage
+    - resource:product-a-identity
+    - resource:product-a-key-vault
+    - component:product-a-module
+    - resource:tenant-tms-endpoints
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: product-a-db
+  title: Database migrations (product-a-db)
+  description: >-
+    Helm chart that runs the API image as a Kubernetes Job to verify, migrate or seed the database.
+    Built by the API pipeline and promoted together with it, at the same version.
+  tags: [dotnet, efcore, helm]
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: product-a/product-a
+    dev.azure.com/build-definition: product-a-api-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/product-a/_git/product-a?path=/charts/product-a-db
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-a-db
+    argocd/app-selector: example.com/service=product-a-db
+spec:
+  type: job
+  lifecycle: production
+  owner: product-a-team
+  system: product-a
+  subcomponentOf: component:product-a-api
+  dependsOn:
+    - resource:product-a-database
+    - resource:product-a-key-vault

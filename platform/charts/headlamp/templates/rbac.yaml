@@ -1,0 +1,14 @@
+{{- /*
+The ServiceAccount only. No ClusterRoleBinding: Headlamp acts with the user's own
+token. The original bound this ServiceAccount to cluster-admin.
+*/ -}}
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "headlamp.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "headlamp.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- end }}

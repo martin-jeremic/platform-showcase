@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'grafana-sso-gateway' to 'aks-org-prod'.
+chartPath:     grafana-sso-gateway
+chartRevision: grafana-sso-gateway-1.0.2   # pinned git tag -- the pin that makes rollback possible
+releaseName:   grafana-sso-gateway
+namespace:     observability
+syncWave:      "2"

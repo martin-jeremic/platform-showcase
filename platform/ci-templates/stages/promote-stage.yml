@@ -1,0 +1,114 @@
+# stages/promote-stage.yml
+#
+# Company-services CD: promote what build-stage.yml built, by writing GitOps descriptors in
+# gitops/services. It never rebuilds and never talks to a cluster; Argo CD on the hub does the
+# deploying.
+#
+#   Promote_Dev       apps/<app>/dev/       digestFrom: artifact  (deploy-meta-<app> of the CI run)
+#                     Environment `Development`, no approval: dev follows main automatically.
+#   Promote_Services  apps/<app>/services/  digestFrom: gitops    (copies apps/<app>/dev/ exactly)
+#                     Environment `Production`, approval check: production runs byte-for-byte
+#                     what dev ran, and only after a human approved it.
+#
+# One deployment job per app, so a four-app workspace shows four approvals under one stage and
+# one failing app does not hide the others.
+#
+# release.yaml must exist already (requireReleaseFile): in this model it carries the hand-seeded
+# chart.name and destination, and the promotion only moves chart.version.
+#
+# Caller prerequisites:
+#   resources.pipelines:    - pipeline: <metaPipelineAlias>  (the CI, trigger on main)
+#   resources.repositories: - repository: gitops  (name: platform/services-gitops)
+
+parameters:
+  # App folders under apps/ (each must have a deploy-meta-<app> artifact in the CI run).
+  - name: apps
+    type: object
+  - name: metaPipelineAlias
+    type: string
+  - name: gitopsRepoUrl
+    type: string
+    default: https://dev.azure.com/example-org/platform/_git/services-gitops
+  - name: gitopsBranch
+    type: string
+    default: main
+  - name: devEnv
+    type: string
+    default: dev
+  - name: servicesEnv
+    type: string
+    default: services
+  - name: devEnvironmentName
+    type: string
+    default: Development
+  - name: servicesEnvironmentName
+    type: string
+    default: Production
+  - name: allowDowngrade
+    type: boolean
+    default: false
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: Promote_Dev
+    displayName: Promote to dev
+    jobs:
+      - ${{ each app in parameters.apps }}:
+        - deployment: PromoteDev_${{ replace(app, '-', '_') }}
+          displayName: ${{ app }} -> ${{ parameters.devEnv }}
+          environment: ${{ parameters.devEnvironmentName }}
+          uses:
+            repositories:
+              - gitops
+          pool: ${{ parameters.pool }}
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: none
+                  # Deployment jobs download every artifact of every pipeline resource by default;
+                  # opt out and fetch only this app's deploy-meta (inside the promote steps).
+                  - download: none
+                  - template: ../steps/gitops-promote-steps.yml
+                    parameters:
+                      appName: ${{ app }}
+                      targetEnv: ${{ parameters.devEnv }}
+                      digestFrom: artifact
+                      metaPipelineAlias: ${{ parameters.metaPipelineAlias }}
+                      requireReleaseFile: true
+                      allowDowngrade: ${{ parameters.allowDowngrade }}
+                      gitopsRepoUrl: ${{ parameters.gitopsRepoUrl }}
+                      gitopsBranch: ${{ parameters.gitopsBranch }}
+
+  - stage: Promote_Services
+    displayName: Promote to services (approval-gated)
+    dependsOn: Promote_Dev
+    condition: succeeded()
+    jobs:
+      - ${{ each app in parameters.apps }}:
+        - deployment: PromoteServices_${{ replace(app, '-', '_') }}
+          displayName: ${{ app }} -> ${{ parameters.servicesEnv }} (copy the dev digest)
+          environment: ${{ parameters.servicesEnvironmentName }}
+          uses:
+            repositories:
+              - gitops
+          pool: ${{ parameters.pool }}
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: none
+                  - download: none
+                  - template: ../steps/gitops-promote-steps.yml
+                    parameters:
+                      appName: ${{ app }}
+                      targetEnv: ${{ parameters.servicesEnv }}
+                      sourceEnv: ${{ parameters.devEnv }}
+                      digestFrom: gitops
+                      requireReleaseFile: true
+                      allowDowngrade: ${{ parameters.allowDowngrade }}
+                      gitopsRepoUrl: ${{ parameters.gitopsRepoUrl }}
+                      gitopsBranch: ${{ parameters.gitopsBranch }}

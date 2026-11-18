@@ -1,0 +1,29 @@
+# examples/GitVersion.yml - the per-service GitVersion 6 configuration the product-a services use.
+#
+# Mainline: every commit on main is a release (x.y.z); develop produces prereleases
+# (x.y.z-alpha.n) so the dev image and its chart sort BELOW the release they lead to.
+# The bump comes from the commit message, not from branch names or manual tags.
+
+next-version: 1.0.0
+mode: ContinuousDeployment
+strategies:
+  - ConfiguredNextVersion
+  - Mainline
+
+commit-message-incrementing: Enabled
+major-version-bump-message: '^(breaking|BREAKING CHANGE|feat!|fix!)'
+minor-version-bump-message: '^feat'
+patch-version-bump-message: '^(fix|chore|refactor|perf|style|test|docs|build|ci)'
+no-bump-message: '^(skip|no-bump)'
+
+branches:
+  main:
+    regex: ^main$
+    label: ''
+    increment: Patch
+    is-release-branch: true
+  develop:
+    regex: ^develop$
+    label: alpha
+    increment: Minor
+    track-merge-target: true

@@ -1,0 +1,54 @@
+{{- /*
+One tenant's LogQL rules, in the shape the Loki rules sidecar of the
+observability release reads (its values.yaml, loki.sidecar.rules):
+  - label loki_rule (any value): the sidecar copies this ConfigMap's keys...
+  - ...into <folder>/<annotation value>: k8s-sidecar-target-directory is the
+    sidecar image's built-in folder annotation, and a relative value is joined
+    onto its folder, so the files land in /rules/<tenant>/ -- the directory the
+    Loki ruler (local storage) evaluates as tenant <tenant>.
+The ConfigMap must live in the Loki release's namespace: the sidecar watches only
+its own (sidecar.rules.searchNamespace unset).
+
+THE FILE-COUNT GUARD. Each rules file is a data key written out here. A new file
+under log-rules/ must be added as a key below; the count check makes forgetting it
+a render error instead of a rule that silently never ships. Files about one
+service ship only when their rules.<name> switch is on.
+
+Files are loaded with .Files.Get, NOT tpl: Prometheus template syntax in the
+annotations ($labels / $value inside double braces) reaches the ruler intact.
+*/ -}}
+{{- $tenant := required "tenant is required: the Loki tenant these rules evaluate in -- set it in platform/values/<cluster>/log-rules-<tenant>.yaml" .Values.tenant -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $tenant) -}}
+{{- fail (printf "tenant %q is not a lowercase DNS label: it names a ConfigMap and a directory under the rules sidecar's folder" $tenant) -}}
+{{- end -}}
+{{- $shipped := 3 -}}
+{{- if ne (len (.Files.Glob "log-rules/*.yaml")) $shipped -}}
+{{- fail (printf "log-rules/ holds %d files, but templates/configmap.yaml ships %d (exceptions.yaml, http.yaml, ingest-rate.yaml): add the new file as a data key there" (len (.Files.Glob "log-rules/*.yaml")) $shipped) -}}
+{{- end -}}
+{{- $rules := required "rules is required: the per-service rule-file switches (values.yaml)" .Values.rules -}}
+{{- if not (hasKey $rules "ingestRate") -}}
+{{- fail "rules.ingestRate is required (true or false): it switches log-rules/ingest-rate.yaml" -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-rules-{{ $tenant }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    loki_rule: "true"
+    app.kubernetes.io/name: observability-log-rules
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/component: log-alert-rules
+  annotations:
+    k8s-sidecar-target-directory: {{ $tenant | quote }}
+data:
+  exceptions.yaml: |-
+{{ .Files.Get "log-rules/exceptions.yaml" | indent 4 }}
+  http.yaml: |-
+{{ .Files.Get "log-rules/http.yaml" | indent 4 }}
+  {{- if $rules.ingestRate }}
+  ingest-rate.yaml: |-
+{{ .Files.Get "log-rules/ingest-rate.yaml" | indent 4 }}
+  {{- end }}

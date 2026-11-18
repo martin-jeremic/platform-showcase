@@ -1,0 +1,19 @@
+{{- /*
+Rendered only when more than one replica can exist. minAvailable: 1 over a single replica would
+make every node drain wait forever for an eviction the budget never allows.
+*/ -}}
+{{- $replicas := .Values.replicaCount | int }}
+{{- if .Values.autoscaling.enabled }}{{- $replicas = .Values.autoscaling.minReplicas | int }}{{- end }}
+{{- if and .Values.podDisruptionBudget.enabled (gt $replicas 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "product-a-api.fullname" . }}
+  labels:
+    {{- include "product-a-api.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "product-a-api.selectorLabels" . | nindent 6 }}
+{{- end }}

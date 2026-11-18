@@ -1,0 +1,9 @@
+# Platform descriptor -- its PRESENCE deploys 'log-rules-product-a-stage' to 'hub-dev'.
+# The spoke's logs arrive through observability-ingest into the HUB's Loki, so its
+# rules are evaluated by the hub's ruler and routed by the hub's Alertmanager
+# (audience product-a). One descriptor per tenant, not a loop in a template.
+chartPath:     observability-log-rules
+chartRevision: observability-log-rules-0.2.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   log-rules-product-a-stage
+namespace:     observability
+syncWave:      "5"

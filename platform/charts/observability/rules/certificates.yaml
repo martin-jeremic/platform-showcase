@@ -1,0 +1,63 @@
+# cert-manager Certificate alerts.
+#
+# Scrape prerequisite: the cert-manager ServiceMonitor
+# (the cert-manager chart's cert-manager.prometheus.servicemonitor.enabled,
+# on in its base values). Before it exists none of these series do, and
+# every rule here is dormant -- `< threshold` and `== 1` against a missing
+# series match nothing. No absent() here, so this file cannot fire permanently;
+# its gate exists for symmetry and so that a cluster opts in deliberately.
+#
+# No job= filter: certmanager_* is unambiguous, and an adopted release on one
+# cluster may carry a different name.
+#
+# honorLabels is false on the ServiceMonitor, so a Certificate's own namespace
+# label arrives as exported_namespace (`namespace` is the target's,
+# cert-manager).
+#
+# CLUSTER-AWARE: `min by (cluster, ...)`, see rules/workload.yaml.
+#
+# Ported from the product lineage of this chart, made cluster-aware.
+groups:
+  - name: platform.certificates
+    rules:
+      - alert: PlatformCertificateExpiringSoon
+        # cert-manager renews at ~2/3 lifetime (Let's Encrypt: ~30d remaining), so
+        # 14d remaining means renewal has already been failing for ~2 weeks.
+        expr: |
+          min by (cluster, name, exported_namespace) (certmanager_certificate_expiration_timestamp_seconds) - time()
+            < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate {{ $labels.name }} expires in <14d"
+          description: >-
+            Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} on
+            {{ $labels.cluster }} expires in {{ $value | humanizeDuration }}.
+            cert-manager should have renewed it ~16 days ago; check the
+            Certificate/Order/Challenge chain.
+
+      - alert: PlatformCertificateExpiryCritical
+        expr: |
+          min by (cluster, name, exported_namespace) (certmanager_certificate_expiration_timestamp_seconds) - time()
+            < 7 * 86400
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificate {{ $labels.name }} expires in <7d"
+          description: >-
+            Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} on
+            {{ $labels.cluster }} expires in {{ $value | humanizeDuration }}. Manual
+            intervention required now.
+
+      - alert: PlatformCertificateNotReady
+        expr: certmanager_certificate_ready_status{condition="False"} == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate {{ $labels.name }} not Ready"
+          description: >-
+            Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} on
+            {{ $labels.cluster }} has reported Ready=False for 1h.

@@ -1,0 +1,8 @@
+apiVersion: v2
+name: product-a-api
+description: Product A platform API (.NET). Stub chart showing the service-side platform contract.
+type: application
+# CI overwrites both with the release version before `helm package`, so chart, image and
+# assembly carry one version. The values here are only what a local `helm template` sees.
+version: 0.1.0
+appVersion: "0.1.0"

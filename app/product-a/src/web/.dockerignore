@@ -1,0 +1,10 @@
+# The web image builds with THIS folder as context, so the monorepo root .dockerignore does not
+# apply here. Never send local installs, build output or the chart to the builder.
+node_modules
+dist
+.angular
+.nx
+coverage
+helm
+*.md
+.npmrc

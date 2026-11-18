@@ -1,0 +1,109 @@
+# stages/pr-node-stage.yml
+#
+# PR gate for a Node service (NestJS API or a React/Angular SPA):
+#
+#   Lint job    `docker build --target <lintTarget>` - the Dockerfile has a stage that runs the
+#               linter (`FROM base AS lint` + `RUN npm run lint`). Linting in the image's own
+#               base stage means the PR lints with exactly the Node version, lock file and
+#               dependency tree the image is built from. The RUN is the gate: a lint error fails
+#               the build of that stage. (The original also `docker run` the lint image after
+#               building it, which re-ran nothing; dropped.)
+#   Checks job  optional npm scripts on the agent (typecheck, unit tests, a production build).
+#
+# The private npm feed is reached through a BuildKit secret mount (`--secret id=npmrc`); the
+# Dockerfile reads it with `RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci`.
+# Nothing token-shaped is ever passed as a build argument.
+#
+# Requires an agent with a Docker daemon (the company build agents have one).
+
+parameters:
+  - name: stageName
+    type: string
+    default: NodeChecks
+  - name: dependsOn
+    type: object
+    default: []
+  - name: dockerfile
+    type: string
+  - name: buildContext
+    type: string
+    default: '.'
+  - name: lintTarget
+    type: string
+    default: lint
+  - name: npmrcSecureFile
+    type: string
+    default: ''
+  # npm scripts to run on the agent after `npm ci`, e.g. [ typecheck, test, build ]. [] = none.
+  - name: npmScripts
+    type: object
+    default: []
+  - name: workingDirectory
+    type: string
+    default: '.'
+  - name: nodeVersion
+    type: string
+    default: '20.x'
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Node lint + checks
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: Lint
+        displayName: Lint (Dockerfile target ${{ parameters.lintTarget }})
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - ${{ if ne(parameters.npmrcSecureFile, '') }}:
+            - task: DownloadSecureFile@1
+              name: npmrc
+              displayName: Download .npmrc (secure file)
+              inputs:
+                secureFile: ${{ parameters.npmrcSecureFile }}
+          - bash: |
+              set -euo pipefail
+              ARGS=(--target "$LINT_TARGET" -f "$DOCKERFILE" -t "pr-lint:$BUILD_BUILDID")
+              case "${NPMRC_PATH:-}" in ''|'$('*) ;; *) ARGS+=(--secret "id=npmrc,src=$NPMRC_PATH") ;; esac
+              DOCKER_BUILDKIT=1 docker build "${ARGS[@]}" "$BUILD_CONTEXT"
+              docker image rm "pr-lint:$BUILD_BUILDID" > /dev/null || true
+            displayName: docker build --target ${{ parameters.lintTarget }}
+            env:
+              DOCKERFILE: ${{ parameters.dockerfile }}
+              BUILD_CONTEXT: ${{ parameters.buildContext }}
+              LINT_TARGET: ${{ parameters.lintTarget }}
+              NPMRC_PATH: $(npmrc.secureFilePath)
+          - template: ../steps/hadolint-steps.yml
+            parameters:
+              dockerfile: ${{ parameters.dockerfile }}
+
+      - ${{ if gt(length(parameters.npmScripts), 0) }}:
+        - job: Checks
+          displayName: npm ${{ join(', ', parameters.npmScripts) }}
+          pool: ${{ parameters.pool }}
+          steps:
+            - checkout: self
+              fetchDepth: 1
+            - task: UseNode@1
+              displayName: Node ${{ parameters.nodeVersion }}
+              inputs:
+                version: ${{ parameters.nodeVersion }}
+            - ${{ if ne(parameters.npmrcSecureFile, '') }}:
+              - task: npmAuthenticate@0
+                displayName: Authenticate to the private feed
+                inputs:
+                  workingFile: ${{ parameters.workingDirectory }}/.npmrc
+            - bash: npm ci
+              displayName: npm ci
+              workingDirectory: ${{ parameters.workingDirectory }}
+            - ${{ each script in parameters.npmScripts }}:
+              - bash: npm run "$SCRIPT"
+                displayName: npm run ${{ script }}
+                workingDirectory: ${{ parameters.workingDirectory }}
+                env:
+                  SCRIPT: ${{ script }}

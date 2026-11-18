@@ -1,0 +1,106 @@
+# Scale-EVENT notifications: pods (Deployments/StatefulSets) and nodes going
+# up or down. Informational, not failure conditions -- the ACTIONABLE scale
+# alerts already come from defaultRules:
+#   HPA pinned at max            -> KubeHpaMaxedOut          (kubernetes-apps)
+#   HPA can't reach desired      -> KubeHpaReplicasMismatch  (kubernetes-apps)
+#   desired != available         -> KubeDeploymentReplicasMismatch / StatefulSet...
+#   node lost                    -> KubeNodeNotReady / KubeNodeUnreachable
+#
+# Mechanism: offset arithmetic. `x - x offset 30m > 0` is true for exactly 30m
+# after the change, then the alert self-resolves -- an event shaped as an alert.
+# `for:` is deliberately absent (it would only delay the event); the window
+# bounds how long the event stays visible in the Alertmanager UI.
+#
+# severity: notice, DELIBERATELY NOT info. The stack's InfoInhibitor mutes
+# severity=info alerts in any namespace with no warning/critical firing (the
+# common case) -- muted means hidden in the Alertmanager UI AND never delivered.
+# `notice` escapes the inhibitor's `severity = info` matcher while staying
+# clearly non-actionable; notifications.config routes it to devops-notice
+# (mail, 24h repeat, no resolved mail).
+#
+# Workload rules use SPEC replicas (the intent), not status: spec moves on HPA
+# and manual `kubectl scale` but NOT during rolling updates -- status_replicas
+# bumps on maxSurge and would false-fire on every deploy. A brand-new workload
+# has no 30m-old series, so first deploys do not fire either.
+#
+# CLUSTER-AWARE: the node rules count `by (cluster)`. A bare count() on the hub
+# sums every cluster's nodes, so one cluster scaling up while another scaled
+# down nets to zero and neither event fires. The workload rules do no
+# aggregation, so every label -- cluster included -- carries through.
+#
+# Ported from the product lineage of this chart, made cluster-aware.
+groups:
+  - name: platform.scaling
+    rules:
+      - alert: PlatformNodeScaledUp
+        expr: |
+          count by (cluster) (kube_node_info) - count by (cluster) (kube_node_info offset 30m) > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "{{ $labels.cluster }} scaled up: +{{ $value }} node(s)"
+          description: >-
+            The node count of {{ $labels.cluster }} increased by {{ $value }} in the
+            last 30m (autoscaler or manual nodepool scale). Check which pool:
+            kubectl get nodes -L agentpool --sort-by=.metadata.creationTimestamp
+
+      - alert: PlatformNodeScaledDown
+        expr: |
+          count by (cluster) (kube_node_info offset 30m) - count by (cluster) (kube_node_info) > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "{{ $labels.cluster }} scaled down: -{{ $value }} node(s)"
+          description: >-
+            The node count of {{ $labels.cluster }} decreased by {{ $value }} in the
+            last 30m. Expected from the autoscaler (or a nightly deallocation) after
+            low load; if workloads got evicted with it, the workload alerts say so
+            separately.
+
+      - alert: PlatformDeploymentScaledUp
+        expr: |
+          kube_deployment_spec_replicas - (kube_deployment_spec_replicas offset 30m) > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} scaled up (+{{ $value }})"
+          description: >-
+            Desired replicas of {{ $labels.namespace }}/{{ $labels.deployment }} on
+            {{ $labels.cluster }} increased by {{ $value }} in the last 30m (HPA or
+            manual scale).
+
+      - alert: PlatformDeploymentScaledDown
+        expr: |
+          (kube_deployment_spec_replicas offset 30m) - kube_deployment_spec_replicas > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} scaled down (-{{ $value }})"
+          description: >-
+            Desired replicas of {{ $labels.namespace }}/{{ $labels.deployment }} on
+            {{ $labels.cluster }} decreased by {{ $value }} in the last 30m (HPA
+            scale-in or manual scale; 0 desired means someone scaled it to zero).
+
+      - alert: PlatformStatefulSetScaledUp
+        expr: |
+          kube_statefulset_replicas - (kube_statefulset_replicas offset 30m) > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} scaled up (+{{ $value }})"
+          description: >-
+            Desired replicas of {{ $labels.namespace }}/{{ $labels.statefulset }} on
+            {{ $labels.cluster }} increased by {{ $value }} in the last 30m.
+
+      - alert: PlatformStatefulSetScaledDown
+        expr: |
+          (kube_statefulset_replicas offset 30m) - kube_statefulset_replicas > 0
+        labels:
+          severity: notice
+        annotations:
+          summary: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} scaled down (-{{ $value }})"
+          description: >-
+            Desired replicas of {{ $labels.namespace }}/{{ $labels.statefulset }} on
+            {{ $labels.cluster }} decreased by {{ $value }} in the last 30m. For
+            rabbitmq, mongo, loki or prometheus this is unusual -- confirm it was
+            intentional.

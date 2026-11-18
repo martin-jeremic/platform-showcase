@@ -1,0 +1,6 @@
+apiVersion: v2
+name: product-a-referencedata
+description: Reference-data loader for Product A. One CronJob per dataset, deploy-time seed Jobs, one command consumer.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

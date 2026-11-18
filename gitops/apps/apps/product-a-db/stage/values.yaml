@@ -1,0 +1,48 @@
+# Stage env config for product-a-db (migration Job chart), cluster product-a-stage (on-prem MicroK8s spoke of the hub).
+# Runs product-a-api's image (same digest, same chart version: promoted together, and
+# scripts/check-configmaps.py fails the PR if the pins ever differ). No Deployment, no ConfigMap.
+#
+# Its own Argo Application with selfHeal off (release.yaml). Argo gives no ordering between this
+# Application and product-a-api's, so every migration must be backward compatible with the
+# running API (expand first, contract in a later release).
+
+# ── Identity and secrets ─────────────────────────────────────────────────────────────────────
+# Workload identity: the pod's service account is federated with ONE user-assigned identity per
+# app and environment, which holds Key Vault Secrets User on kv-product-a-stage and nothing else.
+# Replaces node (kubelet) identity, which every pod on the node shared and which could read the
+# WHOLE vault.
+# On the MicroK8s spoke this works through the cluster's published OIDC issuer: Entra ID trusts
+# tokens of this service account exactly as it does on AKS.
+workloadIdentity:
+  enabled: true
+  clientId: "22222222-cccc-0000-0000-000000000000"   # per environment; NOT the object id of the identity
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-stage
+  tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+# Reads the SAME Key Vault object as the API (product-a-api--database); nothing extra to seed.
+
+# MicroK8s has no kubelet identity: images are pulled with the namespace pull secret the platform
+# layer creates.
+imagePullSecrets:
+  - name: productacr-pull
+
+# One Job per runNonce: bump it (a plain string) to re-run the migration without a new digest.
+# "Run it again" is always a NEW Job name, never a mutation of an existing Job.
+migrationJob:
+  enabled: true
+  mode: migrate
+  runNonce: "1"
+  activeDeadlineSeconds: 1200
+  backoffLimit: 0
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+nodeSelector: {}
+tolerations: []

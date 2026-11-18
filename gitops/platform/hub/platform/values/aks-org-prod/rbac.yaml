@@ -1,0 +1,32 @@
+# The company services' namespaces, one Entra group each (object IDs, not names).
+namespaces:
+  - name: access
+    create: true
+    entraGroupId: "33333333-3333-3333-3333-333333333333"
+    entraGroupName: grp-k8s-org-prod-access
+    role: edit
+  - name: i18n
+    create: true
+    entraGroupId: "44444444-4444-4444-4444-444444444444"
+    entraGroupName: grp-k8s-org-prod-i18n
+    role: edit
+  - name: ordering
+    create: true
+    entraGroupId: "55555555-5555-5555-5555-555555555555"
+    entraGroupName: grp-k8s-org-prod-ordering
+    role: edit
+  - name: payments
+    create: true
+    entraGroupId: "66666666-6666-6666-6666-666666666666"
+    entraGroupName: grp-k8s-org-prod-payments
+    role: edit
+  - name: hr
+    create: true
+    entraGroupId: "77777777-7777-7777-7777-777777777777"
+    entraGroupName: grp-k8s-org-prod-hr
+    role: edit
+clusterBindings:
+  - name: platform-readers-view
+    clusterRole: view
+    entraGroupId: "88888888-8888-8888-8888-888888888888"
+    entraGroupName: grp-k8s-org-prod-readers

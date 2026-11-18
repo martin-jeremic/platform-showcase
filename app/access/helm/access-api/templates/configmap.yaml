@@ -1,0 +1,53 @@
+{{- /*
+Explicit, hasKey-gated keys (same rules as payments-api's configmap.yaml). One list value:
+ExcludedClientNames is written as a YAML list in values and JOINED into one comma-separated value
+here; the app splits it. Rendering it as ExcludedClientNames__0..n would need `range` and would
+leave stale indexes behind when the list shrinks.
+*/ -}}
+{{- $env := .Values.env }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "access-api.fullname" . }}-config
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/ignore: "true"
+data:
+  ASPNETCORE_ENVIRONMENT: {{ $env.ASPNETCORE_ENVIRONMENT | default "Production" | quote }}
+  {{- if hasKey $env "Api__Name" }}
+  Api__Name: {{ $env.Api__Name | quote }}
+  {{- end }}
+  {{- if hasKey $env "App__UseSwagger" }}
+  App__UseSwagger: {{ $env.App__UseSwagger | toString | quote }}
+  {{- end }}
+  {{- if hasKey $env "App__MigrateOnStartup" }}
+  App__MigrateOnStartup: {{ $env.App__MigrateOnStartup | toString | quote }}
+  {{- end }}
+  {{- if hasKey $env "Identity__Authority" }}
+  Identity__Authority: {{ $env.Identity__Authority | quote }}
+  {{- end }}
+  {{- if hasKey $env "Identity__ClientId" }}
+  Identity__ClientId: {{ $env.Identity__ClientId | quote }}
+  {{- end }}
+  {{- if hasKey $env "Database__Server" }}
+  Database__Server: {{ $env.Database__Server | quote }}
+  {{- end }}
+  {{- if hasKey $env "Database__Name" }}
+  Database__Name: {{ $env.Database__Name | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__HostName" }}
+  RabbitMq__HostName: {{ $env.RabbitMq__HostName | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__Port" }}
+  RabbitMq__Port: {{ $env.RabbitMq__Port | toString | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__UserName" }}
+  RabbitMq__UserName: {{ $env.RabbitMq__UserName | quote }}
+  {{- end }}
+  {{- if hasKey $env "RabbitMq__Exchange" }}
+  RabbitMq__Exchange: {{ $env.RabbitMq__Exchange | quote }}
+  {{- end }}
+  {{- if hasKey $env "ExcludedClientNames" }}
+  ExcludedClientNames: {{ $env.ExcludedClientNames | join "," | quote }}
+  {{- end }}

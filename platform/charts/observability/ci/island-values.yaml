@@ -1,0 +1,155 @@
+# CI values: the island cluster's shape -- standalone stack, Loki and Tempo on Azure
+# Blob through workload identity, notifications ON with workload identity.
+kubePromStack:
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  prometheus:
+    prometheusSpec:
+      externalLabels:
+        cluster: aks-product-a-prod
+  alertmanager:
+    serviceAccount:
+      annotations:
+        azure.workload.identity/client-id: "77777777-7777-7777-7777-777777777777"
+    alertmanagerSpec:
+      podMetadata:
+        labels:
+          azure.workload.identity/use: "true"
+      volumes:
+        - name: alertmanager-kv
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: alertmanager-kv
+      volumeMounts:
+        - name: alertmanager-kv
+          mountPath: /etc/alertmanager/kv
+          readOnly: true
+  grafana:
+    persistence:
+      storageClassName: platform-retain
+      size: 2Gi
+    grafana.ini:
+      server:
+        domain: app.product-a.example.net
+        root_url: https://app.product-a.example.net/monitoring/grafana
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        access: proxy
+        jsonData:
+          httpHeaderName1: X-Scope-OrgID
+          derivedFields:
+            - datasourceUid: tempo
+              matcherRegex: '"trace_id":"([^"]+)"'
+              name: TraceID
+              url: "${__value.raw}"
+        secureJsonData:
+          httpHeaderValue1: aks-product-a-prod
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        url: http://tempo.observability.svc.cluster.local:3200
+        access: proxy
+        jsonData:
+          httpHeaderName1: X-Scope-OrgID
+          tracesToLogsV2:
+            datasourceUid: loki
+            filterByTraceID: true
+        secureJsonData:
+          httpHeaderValue1: aks-product-a-prod
+
+components:
+  tempo: true
+
+loki:
+  loki:
+    storage:
+      type: azure
+      azure:
+        accountName: stproductaobs
+        useFederatedToken: true
+      bucketNames:
+        chunks: loki-chunks
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: azure
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    compactor:
+      retention_enabled: true
+      delete_request_store: azure
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "88888888-8888-8888-8888-888888888888"
+  singleBinary:
+    podLabels:
+      azure.workload.identity/use: "true"
+    persistence:
+      storageClass: platform-retain
+      size: 10Gi
+
+tempo:
+  serviceAccount:
+    create: true
+    # The federated credential's subject (infra/: the Tempo identity).
+    name: observability-tempo
+    annotations:
+      azure.workload.identity/client-id: "99999999-9999-9999-9999-999999999999"
+  podLabels:
+    azure.workload.identity/use: "true"
+  tempo:
+    storage:
+      trace:
+        backend: azure
+        azure:
+          storage_account_name: stproductaobs
+          container_name: tempo-traces
+          use_federated_token: true
+  persistence:
+    storageClassName: platform-retain
+    size: 10Gi
+
+alloyPipeline:
+  cluster: aks-product-a-prod
+  tenant: aks-product-a-prod
+  parseLogContract: true
+
+dashboards:
+  folders:
+    Platform: true
+    Product: true
+
+prometheusRules:
+  files:
+    certificates: true
+    edge: true
+    rabbitmq: true
+    keycloak: true
+    argocd: true
+    trivy: false
+
+notifications:
+  enabled: true
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  graph:
+    clientId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    sender: alerts@example.com
+    recipients:
+      - platform-team@example.com
+  keyVault:
+    keyvaultName: kv-product-a-prod
+    authMode: workloadIdentity

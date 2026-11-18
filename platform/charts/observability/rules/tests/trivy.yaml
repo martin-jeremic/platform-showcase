@@ -1,0 +1,135 @@
+# promtool unit tests for rules/trivy.yaml:
+#   promtool test rules observability/rules/tests/trivy.yaml
+# Run by tools/check-observability.sh. This directory is NOT loaded into the
+# chart: templates/prometheus-rules.yaml globs rules/*.yaml only.
+#
+# Series copy the hub's real shape (read live): trivy_* from job
+# trivy with the operator's labels, severity in title case. One sample
+# every 5m, the group's own interval, so every evaluation finds a sample inside
+# the 5m lookback. 288 samples = 1 day.
+rule_files:
+  - ../trivy.yaml
+
+evaluation_interval: 5m
+
+tests:
+  # product-a-stage has run Trivy for 10 days. CVE-2026-0001 (fixable) has been in
+  # the UI image all along: backlog, never alerts. CVE-2026-0002 (fixable) appears
+  # at day 9: alerts. CVE-2026-0003 appears at day 9 too but has no fix, and
+  # CVE-2026-0004 is fixable but High: neither alerts. hub-dev installed
+  # Trivy at day 8, so ALL its findings are new -- and it stays quiet anyway,
+  # because this Prometheus has had its target for less than 2 days.
+  - name: new fixable Critical CVE
+    interval: 5m
+    input_series:
+      - series: 'up{cluster="product-a-stage", job="trivy", instance="trivy.trivy.svc.cluster.local:8080"}'
+        values: '1x2880'
+      - series: 'trivy_vulnerability_id{cluster="product-a-stage", job="trivy", namespace="product-a", resource_name="product-a-web-7d9f", container_name="ui", image_registry="productacr.azurecr.io", image_repository="product-a-web", image_tag="1.35.0", vuln_id="CVE-2026-0001", severity="Critical", resource="openssl", installed_version="3.3.0", fixed_version="3.3.2"}'
+        values: '1x2880'
+      - series: 'trivy_vulnerability_id{cluster="product-a-stage", job="trivy", namespace="product-a", resource_name="product-a-web-7d9f", container_name="ui", image_registry="productacr.azurecr.io", image_repository="product-a-web", image_tag="1.35.0", vuln_id="CVE-2026-0002", severity="Critical", resource="libexpat", installed_version="2.6.0", fixed_version="2.6.4"}'
+        values: '_x2592 1x288'
+      - series: 'trivy_vulnerability_id{cluster="product-a-stage", job="trivy", namespace="product-a", resource_name="product-a-web-7d9f", container_name="ui", image_registry="productacr.azurecr.io", image_repository="product-a-web", image_tag="1.35.0", vuln_id="CVE-2026-0003", severity="Critical", resource="perl-base", installed_version="5.40.1"}'
+        values: '_x2592 1x288'
+      - series: 'trivy_vulnerability_id{cluster="product-a-stage", job="trivy", namespace="product-a", resource_name="product-a-web-7d9f", container_name="ui", image_registry="productacr.azurecr.io", image_repository="product-a-web", image_tag="1.35.0", vuln_id="CVE-2026-0004", severity="High", resource="curl", installed_version="8.10.0", fixed_version="8.11.1"}'
+        values: '_x2592 1x288'
+      - series: 'up{cluster="hub-dev", job="trivy", instance="trivy.trivy.svc.cluster.local:8080"}'
+        values: '_x2304 1x576'
+      - series: 'trivy_vulnerability_id{cluster="hub-dev", job="trivy", namespace="product-a", resource_name="product-a-web-5c2a", container_name="ui", image_registry="productacr.azurecr.io", image_repository="product-a-web", image_tag="1.35.0", vuln_id="CVE-2026-0002", severity="Critical", resource="libexpat", installed_version="2.6.0", fixed_version="2.6.4"}'
+        values: '_x2304 1x576'
+
+    alert_rule_test:
+      # Day 9 + 10m: true since day 9, still pending (for: 30m).
+      - alertname: PlatformTrivyNewFixableCriticalCVE
+        eval_time: 12970m
+        exp_alerts: []
+      # Day 9 + 40m: firing, for CVE-2026-0002 on product-a-stage only.
+      - alertname: PlatformTrivyNewFixableCriticalCVE
+        eval_time: 13000m
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: security
+              cluster: product-a-stage
+              namespace: product-a
+              image_registry: productacr.azurecr.io
+              image_repository: product-a-web
+              image_tag: "1.35.0"
+              vuln_id: CVE-2026-0002
+              fixed_version: "2.6.4"
+            exp_annotations:
+              summary: "New fixable Critical CVE-2026-0002 in product-a-web on product-a-stage"
+              description: >-
+                productacr.azurecr.io/product-a-web:1.35.0
+                in namespace product-a has Critical CVE-2026-0002, fixed in
+                2.6.4. The image did not have it in the past 7 days: this version
+                was just deployed, or the CVE was just published. Rebuild on a patched base image or
+                bump the dependency. All findings: Grafana, Security -> Trivy, CVE list.
+      # Day 9 + 8h: 6h old, so inside the look-back window; keep_firing_for (1h) is over.
+      - alertname: PlatformTrivyNewFixableCriticalCVE
+        eval_time: 13440m
+        exp_alerts: []
+
+  # A Critical secret in the migration image since 0m, with a 10-minute rescan
+  # gap at 60m. A Low one in another image never alerts.
+  - name: exposed secret
+    interval: 5m
+    input_series:
+      - series: 'trivy_image_exposedsecrets{cluster="product-a-stage", job="trivy", namespace="product-a", resource_name="product-a-db-migrate", container_name="migrate", image_registry="productacr.azurecr.io", image_repository="product-a-api", image_tag="2.4.0", severity="Critical"}'
+        values: '1x12 _x2 1x20'
+      - series: 'trivy_image_exposedsecrets{cluster="product-a-stage", job="trivy", namespace="caretta", resource_name="caretta", container_name="caretta", image_registry="docker.io", image_repository="groundcover/caretta", image_tag="v0.0.16", severity="Low"}'
+        values: '2x34'
+
+    alert_rule_test:
+      - alertname: PlatformTrivyExposedSecret
+        eval_time: 20m
+        exp_alerts: []
+      - alertname: PlatformTrivyExposedSecret
+        eval_time: 40m
+        exp_alerts: &secret
+          - exp_labels:
+              severity: warning
+              category: security
+              cluster: product-a-stage
+              namespace: product-a
+              image_registry: productacr.azurecr.io
+              image_repository: product-a-api
+              image_tag: "2.4.0"
+            exp_annotations:
+              summary: "Secret baked into product-a-api on product-a-stage"
+              description: >-
+                productacr.azurecr.io/product-a-api:2.4.0
+                in namespace product-a contains 1 Critical/High secret(s) in its
+                files. Treat each as leaked: rotate it, then rebuild the image without it. Which file
+                and rule: kubectl -n product-a get exposedsecretreports -o yaml.
+      # Inside the rescan gap: keep_firing_for holds the same alert.
+      - alertname: PlatformTrivyExposedSecret
+        eval_time: 70m
+        exp_alerts: *secret
+
+  # product-a-stage's operator stops answering at 60m; hub-dev's keeps going.
+  - name: not reporting
+    interval: 5m
+    input_series:
+      - series: 'up{cluster="product-a-stage", job="trivy", instance="trivy.trivy.svc.cluster.local:8080"}'
+        values: '1x12 0x24'
+      - series: 'up{cluster="hub-dev", job="trivy", instance="10.0.0.10:8080"}'
+        values: '1x36'
+
+    alert_rule_test:
+      - alertname: PlatformTrivyNotReporting
+        eval_time: 80m
+        exp_alerts: []
+      - alertname: PlatformTrivyNotReporting
+        eval_time: 100m
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: security
+              cluster: product-a-stage
+            exp_annotations:
+              summary: "Trivy is not reporting on product-a-stage"
+              description: >-
+                No healthy scrape of job trivy on product-a-stage for 30m: the operator
+                is down or unreachable, so no new scan results arrive and the Security dashboard shows
+                stale numbers. Find the operator (its namespace differs per cluster) with
+                kubectl get pods -A -l app.kubernetes.io/instance=trivy, then read its log.

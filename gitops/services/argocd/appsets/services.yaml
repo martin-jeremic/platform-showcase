@@ -1,0 +1,90 @@
+# ONE ApplicationSet for every company service, every environment.
+#
+# Git files generator over apps/*/*/release.yaml: a service deploys to an env IFF that file
+# exists. The descriptor's parsed YAML (chart.name, chart.version, destination.*) feeds the
+# template, so adding a service or an environment never touches this file.
+#
+# path.segments = ["apps", "<service>", "<env>"]  ->  Application "<service>-<env>".
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: services
+  namespace: argocd-hub
+  labels:
+    app.kubernetes.io/part-of: services
+spec:
+  goTemplate: true
+  # Fail loudly if a release.yaml lacks chart.* or destination.* (which is also why every
+  # descriptor carries BOTH destination keys, one of them empty; see below).
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    preserveResourcesOnDeletion: false   # deleting a release.yaml removes its Application
+  generators:
+    - git:
+        repoURL: https://dev.azure.com/example-org/platform/_git/services-gitops
+        revision: main
+        files:
+          - path: "apps/*/*/release.yaml"
+  template:
+    metadata:
+      name: "{{index .path.segments 1}}-{{index .path.segments 2}}"
+      namespace: argocd-hub
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+      labels:
+        app.kubernetes.io/part-of: services
+        example.com/service: "{{index .path.segments 1}}"
+        example.com/env: "{{index .path.segments 2}}"
+    spec:
+      # The project is DERIVED from the destination namespace: services-<namespace>, one AppProject
+      # per namespace (argocd/projects/<namespace>.yaml) carrying that team's RBAC role.
+      # The prefix keeps it FAIL-CLOSED: a namespace without its own project file has no matching
+      # AppProject, so the controller skips that Application (ErrorOccurred) instead of placing it
+      # in `default` or in another team's project.
+      project: "services-{{.destination.namespace}}"
+      sources:
+        # 1) The chart, named EXPLICITLY by release.yaml (not derived from the folder) so several
+        #    services can share one chart: the four HR frontends all use `hr-app`, each as its own
+        #    Application and its own Helm release.
+        - repoURL: orgacr.azurecr.io/helm
+          chart: "{{.chart.name}}"
+          targetRevision: "{{.chart.version}}"
+          helm:
+            # Release name = folder name, so four Applications of one chart never collide, and a
+            # takeover of a legacy `helm install` keeps the object names it already had.
+            releaseName: "{{index .path.segments 1}}"
+            valueFiles:
+              - "$values/apps/{{index .path.segments 1}}/{{index .path.segments 2}}/values.yaml"
+              # Written by CD and listed last, so the promoted digest overrides values.yaml.
+              - "$values/apps/{{index .path.segments 1}}/{{index .path.segments 2}}/image.yaml"
+        # 2) This repository as the $values source.
+        - repoURL: https://dev.azure.com/example-org/platform/_git/services-gitops
+          targetRevision: main
+          ref: values
+      destination:
+        # dev is addressed by `server` (in-cluster: the hub itself), services by `name` (the
+        # registered spoke aks-org-prod). BOTH keys are always emitted from the descriptor and one
+        # is empty: Argo treats an empty string as unset. A YAML-level {{if}} around either key
+        # would make this file invalid YAML for the root app's kustomize render (templating only
+        # happens later, in the appset controller), and missingkey=error would reject a
+        # descriptor that simply omitted one.
+        server: "{{.destination.server}}"
+        name: "{{.destination.name}}"
+        namespace: "{{.destination.namespace}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          # Server-side apply: see the README section on taking over legacy Helm releases for
+          # what this means for fields a previous owner still holds.
+          - ServerSideApply=true
+          - RespectIgnoreDifferences=true
+      ignoreDifferences:
+        # Reloader stamps this at runtime when it restarts a workload after a ConfigMap/Secret
+        # change. Ignore it so selfHeal does not fight Reloader.
+        - group: apps
+          kind: Deployment
+          jqPathExpressions:
+            - '.spec.template.metadata.annotations."reloader.stakater.com/last-reloaded-from"'

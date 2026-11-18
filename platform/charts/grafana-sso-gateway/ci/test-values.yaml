@@ -1,0 +1,6 @@
+domain: app.product-a.example.net
+oidc:
+  keycloak:
+    baseUrl: https://app.product-a.example.net/keycloak
+  grafana:
+    rootUrl: https://app.product-a.example.net/monitoring/grafana

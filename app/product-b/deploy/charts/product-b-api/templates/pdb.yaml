@@ -1,0 +1,14 @@
+{{- /* Only with more than one replica: minAvailable 1 over a single pod blocks every node drain. */ -}}
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pb.fullname" . }}
+  labels:
+    {{- include "pb.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "pb.selectorLabels" . | nindent 6 }}
+{{- end }}

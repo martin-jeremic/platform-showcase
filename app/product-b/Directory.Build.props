@@ -1,0 +1,76 @@
+<Project>
+
+  <!--
+    Applies to every project in the solution. One target framework, nullable on, warnings as
+    errors: the non-negotiable baseline of a repository started from scratch.
+
+    Warnings-as-errors is not a style preference here. The deterministic core of the product is
+    asserted by analysers (banned APIs such as the ambient culture or the system clock), and an
+    analyser that only produces a warning produces nothing at all.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <IsPackable>false</IsPackable>
+
+    <!--
+      A trap worth recording, found while editing this very file, twice: an XML comment must never
+      contain two consecutive hyphens ANYWHERE in its body, not only next to the closing delimiter,
+      and that includes a command-line flag quoted for illustration. With a double hyphen used as a
+      dash, MSBuild did not report an XML error: the whole PropertyGroup evaluated with
+      TargetFramework read as an empty string, and every build failed with "the TargetFramework
+      value was not recognized", for a file nobody had touched. Reproduced in an isolated scratch
+      project. If that error ever appears for no reason, look here first, and write a flag in a
+      comment as "the restore locked-mode flag", never literally.
+    -->
+
+    <!--
+      InvariantGlobalization is deliberately OFF.
+
+      It was on at first, for determinism. That was wrong: invariant mode drops ICU, and without
+      ICU TimeZoneInfo.FindSystemTimeZoneById("Europe/Berlin") throws on Windows. The domain
+      requires IANA zone names (a numeric offset is not a zone), and every collection window,
+      driving-ban calendar and DST transition depends on resolving them. The production image is
+      the chiseled "extra" variant for the same reason: it keeps ICU and tzdata.
+
+      Determinism comes from never depending on the AMBIENT culture: CurrentCulture and
+      CurrentUICulture are banned at compile time in the core, and every format and parse names
+      InvariantCulture explicitly. Same bytes on every machine, time-zone database kept.
+    -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    Central package management with transitive pinning. A PackageReference that carries its own
+    Version fails the build, so there is one answer to "which version of X do we use". Transitive
+    pinning lets Directory.Packages.props lift a vulnerable package that arrives UNDERNEATH an
+    allowed one, without adding a direct reference to it.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+
+    <!--
+      Lock files, for two reasons: a restore in CI reproduces exactly what was built (CI restores in
+      locked mode and fails on drift), and the licence scan gets the complete TRANSITIVE package list.
+      Scanning only direct references would miss the case the scan exists for: a disallowed package
+      arriving underneath an allowed one.
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <!--
+    Deterministic builds: golden-file tests over rendered documents and EDI messages only mean
+    something if the same input produces the same bytes on every machine. TF_BUILD is set by
+    Azure Pipelines, so local builds keep full source paths for debugging.
+  -->
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(TF_BUILD)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

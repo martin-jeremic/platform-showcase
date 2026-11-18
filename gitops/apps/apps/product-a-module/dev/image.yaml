@@ -1,0 +1,5 @@
+# Managed by CI (gitops-record-steps.yml). Do not edit by hand.
+# The validated dev candidate that the approval-gated Promote stages ship.
+image:
+  digest: "sha256:6c60b293ecb4d4fe242150a80f9ce695304991fedb5997a117be6640529db0d3"
+  version: "2.4.0-alpha.3"

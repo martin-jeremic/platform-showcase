@@ -1,0 +1,4 @@
+# Written by the approval-gated promotion from stage. Do not edit by hand.
+image:
+  digest: "sha256:f18539f8c22f8b8b01e1eba9756b08823c43b830a02870b95ad4c12cd3ed4501"
+  version: "1.9.0-alpha.2"

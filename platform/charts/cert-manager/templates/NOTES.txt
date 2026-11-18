@@ -1,0 +1,17 @@
+{{- $cm := index .Values "cert-manager" -}}
+cert-manager "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+Controller : {{ if $cm.enabled }}cert-manager {{ .Chart.AppVersion }} (subchart pinned), CRDs {{ if $cm.crds.enabled }}managed here (keep={{ $cm.crds.keep }}){{ else }}NOT managed here{{ end }}{{ else }}NOT installed{{ end }}
+
+ClusterIssuers:
+{{- range .Values.clusterIssuers }}
+{{- if .enabled }}
+  - {{ .name }}
+{{- end }}
+{{- end }}
+
+DNS-01 token secret EXPECTED TO PRE-EXIST (this chart cannot create it, by design):
+  {{ .Values.cloudflare.secret.name }} in ns {{ .Values.cloudflare.secret.namespace }}
+  Seed it from the gitops repo's setup/ folder, then check:
+    kubectl -n {{ .Values.cloudflare.secret.namespace }} get secret {{ .Values.cloudflare.secret.name }}
+  Without it the ClusterIssuer stays NotReady and every Certificate hangs unissued.

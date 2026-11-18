@@ -1,0 +1,6 @@
+# Auth on; the elastic password applies on FIRST start only -- rotate it through
+# _security/user/elastic/_password as well (seed-secrets.ps1 says so).
+azureKeyVault:
+  workloadIdentityClientId: "55555555-5555-5555-5555-555555555555"
+  tenantId: "11111111-1111-1111-1111-111111111111"
+  keyvaultName: kv-product-a-prod

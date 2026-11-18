@@ -1,0 +1,27 @@
+{{- $r := index .Values "reloader" -}}
+{{- $ctrl := $r.reloader | default dict -}}
+reloader "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+Controller : {{ if $r.enabled }}Stakater Reloader {{ .Chart.AppVersion }} (subchart pinned){{ else }}subchart DISABLED (reloader.enabled=false) — nothing installed{{ end }}
+Mode       : {{ if $ctrl.autoReloadAll }}AUTO-RELOAD-ALL — every workload referencing a changed ConfigMap/Secret is rolled (opt out with reloader.stakater.com/auto: "false"){{ else }}OPT-IN — only annotated workloads are rolled{{ end }}
+Watch      : {{ if $ctrl.watchGlobally }}all namespaces{{ else }}release namespace only{{ end }}
+Strategy   : {{ $ctrl.reloadStrategy | default "default" }}
+HA         : {{ if $ctrl.enableHA }}enabled ({{ (index $ctrl "deployment" "replicas") | default 2 }} replicas, leader-elected){{ else }}single replica{{ end }}
+
+Opt a workload in (unless auto-reload-all is on) — annotate the Deployment/StatefulSet/DaemonSet:
+  # watch every ConfigMap/Secret this workload mounts or envFrom's:
+  metadata:
+    annotations:
+      reloader.stakater.com/auto: "true"
+  # or target specific objects:
+  #   configmap.reloader.stakater.com/reload: "my-config"
+  #   secret.reloader.stakater.com/reload: "my-secret"
+
+Verify:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name=reloader
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ .Release.Name }}-reloader
+
+Try it:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ .Release.Name }}-reloader
+  # annotate any Deployment with reloader.stakater.com/auto: "true",
+  # then edit a ConfigMap it uses and watch the Deployment roll.

@@ -1,0 +1,201 @@
+# =============================================================================
+# rabbitmq -- BASE values
+# =============================================================================
+# Sync wave 3. The single platform-owned broker. Keycloak (wave 4) registers a
+# RabbitMQ event SPI, which makes this a HARD platform dependency.
+#
+# Nothing in this file can hold a credential: `auth.password` is gone entirely, not
+# just left empty, and so is the template that rendered it. The previous
+# hand-installed broker's values carried plaintext passwords for all FOUR
+# environments following one pattern, so one leaked password revealed all four,
+# production included. None of those may ever be reused; the password seeded into
+# Key Vault is newly generated (CSPRNG, gitops/platform seed-secrets.ps1).
+#
+# SINGLE REPLICA, DELIBERATELY. The two-replica production floor applies to
+# stateless Deployments. This chart has no peer discovery, no clustering and no
+# quorum-queue configuration, so a second replica would be a second independent
+# broker sharing a Service -- worse than one, not better. Real HA means clustered
+# RabbitMQ with quorum queues, which is a different chart.
+replicaCount: 1
+
+image:
+  repository: rabbitmq
+  pullPolicy: IfNotPresent
+  # Empty = Chart.appVersion, the only place the broker version is set.
+  tag: ""
+
+# ---------------------------------------------------------------------------
+# Feature flags (1.2.0)
+# ---------------------------------------------------------------------------
+# An upgraded node leaves every NEW feature flag disabled, and the NEXT minor
+# upgrade refuses to boot until they are enabled: 4.3+ removed Mnesia and requires
+# khepri_db and the 4.x flags. No rabbitmq.conf key enables flags on an existing
+# node (forced_feature_flags_on_init only acts on a blank one), so the container
+# does it itself after the broker is up: `rabbitmqctl enable_feature_flag all`,
+# from a postStart hook -- the step the RabbitMQ Cluster Operator runs for
+# autoEnableAllFeatureFlags. It enables STABLE flags only and is a no-op once they
+# are on, so it runs on every start rather than as a manual step repeated at each
+# upgrade. If the hook fails, kubelet restarts the container: loud, instead of a
+# broker that boots today and refuses to on the next upgrade.
+featureFlags:
+  autoEnableAll: true
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Username only. Not sensitive, and the broker needs it as a literal at startup.
+# NOT `guest` (templates/_helpers.tpl refuses it). Application traffic uses its own
+# user on its own vhost.
+auth:
+  username: "platform"
+  # Required when azureKeyVault.enabled is false (keys rabbitmq-username,
+  # rabbitmq-password). The chart never renders this Secret itself.
+  existingSecret: ""
+
+service:
+  type: ClusterIP
+  amqpPort: 5672
+  managementPort: 15672
+  nodePorts: {}
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+# The image ships rabbitmq_prometheus enabled, so :15692/metrics has always been
+# listening. What was missing is everything around it: the port was not declared,
+# not published on the Service, and nothing scraped it -- so the RabbitMQ dashboard
+# rendered with every panel empty.
+metrics:
+  enabled: true
+  port: 15692
+
+  # Per-queue and per-vhost labels on rabbitmq_queue_*, which queue-depth panels
+  # and the queue alerts group by. WITHOUT this the plugin still exports those
+  # families, but AGGREGATED and unlabelled.
+  #
+  # Delivered as a conf.d drop-in, so enabling or editing it is a pod-spec change
+  # and RESTARTS THE BROKER: roughly 30-60s with no AMQP listener. Keycloak logins
+  # are unaffected (the SPI publishes fire-and-forget), but messages published
+  # during the window are lost. Time the descriptor bump accordingly.
+  perObjectMetrics: true
+
+  serviceMonitor:
+    # FRESH-BOOTSTRAP CAVEAT: the ServiceMonitor CRD arrives with observability,
+    # after this component. On a brand-new cluster set this false until it exists.
+    enabled: true
+    interval: ""
+    # Pinned job label -- see templates/servicemonitor.yaml.
+    jobName: rabbitmq
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  # platform-retain (reclaimPolicy: Retain), owned by the wave-0 secrets-store-csi
+  # chart. NOT managed-csi and emphatically not "" -- an empty value falls through
+  # to the cluster `default` class, which is reclaimPolicy: Delete. That is exactly
+  # what happened on the demo cluster: 2Gi on the default class, one
+  # `kubectl delete pvc` away from losing every queue.
+  storageClass: platform-retain
+  accessMode: ReadWriteOnce
+  # 8Gi, not 2Gi. Queue depth under real load is what fills this, and expanding a
+  # bound disk is possible but disruptive.
+  size: 8Gi
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+# ---------------------------------------------------------------------------
+# Reloader integration
+# ---------------------------------------------------------------------------
+# LOAD-BEARING for secret rotation. When the CSI driver re-reads Key Vault and
+# updates the synced Secret, the running broker still holds the old password in
+# its environment. Reloader sees the Secret change and restarts the pod. The
+# annotation sits on the StatefulSet (the WORKLOAD), where Reloader reads it.
+reloader:
+  enabled: true
+  mode: auto
+
+podAnnotations: {}
+podLabels: {}
+
+# `pool` is the IaC-authoritative label. The demo broker had NO placement at all
+# and landed on the untainted worker pool beside application workloads.
+nodeSelector:
+  pool: infra
+tolerations:
+  - key: workload
+    operator: Equal
+    value: infra
+    effect: NoSchedule
+affinity: {}
+
+priorityClassName: system-cluster-critical
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  # NOT read-only: RabbitMQ writes its metadata store, logs and PID file under
+  # /var/lib/rabbitmq and /var/log/rabbitmq.
+  readOnlyRootFilesystem: false
+
+serviceAccount:
+  # Must be true for workload identity -- the annotation lives on the SA.
+  create: true
+  name: ""
+  annotations: {}
+
+# ============================================================================
+# Azure Key Vault + Secrets Store CSI Driver integration
+# ============================================================================
+azureKeyVault:
+  enabled: true
+
+  # workloadIdentity (default): vault access scoped to this ServiceAccount through
+  #   a federated credential.
+  # vmManagedIdentity: the KUBELET identity. The demo IaC had granted it Key Vault
+  #   Secrets User on the entire vault, so every pod that could create a
+  #   SecretProviderClass could read every secret in it.
+  # servicePrincipal: on-prem clusters with no OIDC issuer; the CSI volume names
+  #   the per-namespace Secret in credentialsSecretName.
+  authMode: workloadIdentity
+
+  # Unused in workloadIdentity mode; must stay EMPTY there -- a value is a
+  # standing invitation to switch back to the broad-access mode.
+  kubeletClientId: ""
+  credentialsSecretName: ""
+
+  # Per cluster.
+  workloadIdentityClientId: ""
+  tenantId: ""
+  keyvaultName: ""
+
+  # Vault objects are named <secretPrefix>--<kvName>, e.g. rabbitmq--password.
+  secretPrefix: "rabbitmq"
+
+  syncedSecretName: "rabbitmq-kv-sync"
+  secretProviderClassName: "rabbitmq-secret-provider"
+
+  # The driver fails the ENTIRE mount if any one object is missing, leaving the
+  # pod in ContainerCreating with a generic error -- so every name here must exist
+  # in the vault before this Application syncs.
+  secrets:
+    - kvName: password
+      key: rabbitmqPassword
+      env: RABBITMQ_DEFAULT_PASS

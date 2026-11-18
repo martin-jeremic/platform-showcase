@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'observability-ingest' to 'hub-dev'.
+chartPath:     observability-ingest
+chartRevision: observability-ingest-0.3.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   observability-ingest
+namespace:     observability
+syncWave:      "4"

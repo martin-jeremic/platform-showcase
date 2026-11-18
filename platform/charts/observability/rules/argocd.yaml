@@ -1,0 +1,185 @@
+# Argo CD alerts -- "did GitOps stop working". WHERE ARGO RUNS ONLY: the hub
+# (hub-dev, namespace argocd-hub, managing the spokes) and the island
+# (aks-product-a-prod, its own in-cluster Argo). On the hub, argocd_app_info for
+# aks-org-prod and aks-product-a-demo apps lives in the HUB's Prometheus. Gate
+# prometheusRules.files.argocd on in those two clusters' values only; anywhere
+# else PlatformArgoCDControllerDown's absent() branch would fire forever.
+#
+# Scrape prerequisite: the argocd chart with argo-cd.controller.metrics.enabled
+# and .serviceMonitor.enabled. hub-dev's argocd descriptor is selfManaged
+# (manual sync) -- the scrape exists only after someone syncs it.
+#
+# THE JOB LABEL IS DERIVED, NOT DECLARED: prometheus-operator names it after the
+# metrics Service, `<argo-cd.controller.fullname>-metrics`. With
+# argo-cd.fullnameOverride: argocd that is
+# argocd-application-controller-metrics. Confirm against live Prometheus
+# before flipping the gate:
+#   curl -s 'http://localhost:9090/api/v1/label/job/values' | grep -i argo
+#   curl -s 'http://localhost:9090/api/v1/series?match[]=argocd_app_sync_total'
+#     (read the real `phase` values before trusting phase=~"Failed|Error")
+#
+# Argo CD 3.x: sync_status and health_status are LABELS on argocd_app_info. The
+# separate argocd_app_sync_status metric was removed years ago.
+#
+# Notification links: these alerts carry dest_namespace, and the notification
+# templates omit the Logs link for them -- the broken workload's logs are in the
+# destination cluster's Loki, which the hub's Grafana cannot query.
+#
+# `cluster` on the per-APPLICATION alerts (AppDegraded, SyncFailed,
+# ComparisonError) is the app's DESTINATION cluster, by Argo's name, not the hub.
+# The series carry cluster=hub-dev (where the controller runs), so without
+# this an app on product-a-stage alerted "@ hub-dev" and was routed with the
+# hub's own alerts, never with its cluster's (notifications.audiences routes by
+# `cluster`). The name comes from platform:argocd_dest_cluster:info below; an app
+# whose dest_server is missing there (a destination Argo does not know -- itself
+# a ComparisonError) keeps the hub's name instead of vanishing from the join.
+#
+# Ported from the product lineage of this chart, made cluster-aware.
+# ControllerDown gained the `or absent(...)` branch the 1.3.0 review asked for:
+# `up == 0` needs a scrape target, and a controller that is Pending, evicted or
+# deleted has none -- without the branch the rule matches nothing in exactly the
+# case its name describes.
+#
+# PlatformClusterUnreachable (2.3.0) widens this file from "did GitOps stop
+# working" to "can the hub reach each cluster at all". Argo's connection status
+# is the ONE hub-side signal that covers the standalone AKS clusters, whose
+# metrics never reach this Prometheus; PlatformClusterSilent (rules/spokes.yaml)
+# sees only the agent spokes and the hub itself.
+#
+# Not covered on purpose, pending burn-in: OutOfSync-for-hours (selfHeal makes
+# brief drift normal, and a persistent failure already shows up as SyncFailed),
+# repo-server and applicationSet internals.
+groups:
+  - name: platform.argocd
+    rules:
+      # Argo's NAME for every destination server: {dest_server, dest_cluster}.
+      # argocd_app_info / argocd_app_sync_total carry only dest_server (a URL);
+      # argocd_cluster_info maps server -> name. Both labels are renamed because
+      # `name` on the app metrics is the APPLICATION. Recorded first in the group,
+      # so the alerts below read this evaluation's value. Argo emits cluster_info
+      # for every cluster with at least one Application, i.e. every dest_server.
+      - record: platform:argocd_dest_cluster:info
+        expr: |
+          max by (dest_server, dest_cluster) (
+            label_replace(
+              label_replace(argocd_cluster_info, "dest_server", "$1", "server", "(.*)"),
+              "dest_cluster", "$1", "name", "(.*)"
+            )
+          )
+
+      - alert: PlatformArgoCDControllerDown
+        expr: |
+          up{job="argocd-application-controller-metrics"} == 0
+          or absent(up{job="argocd-application-controller-metrics"})
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Argo CD application controller is down"
+          description: >-
+            The Argo CD application controller has been unreachable or absent for
+            10m. Nothing is syncing and selfHeal is not running on ANY cluster, so
+            every cluster silently drifts from git and no platform change can be
+            deployed until it returns.
+
+      # Destination join + fallback: see "`cluster` on the per-APPLICATION alerts"
+      # in the header. The same shape in the two alerts after this one.
+      - alert: PlatformArgoCDAppDegraded
+        expr: |
+          argocd_app_info{health_status="Degraded"}
+            * on (dest_server) group_left (dest_cluster) platform:argocd_dest_cluster:info
+          or on (exported_namespace, name)
+          label_replace(argocd_app_info{health_status="Degraded"}, "dest_cluster", "$1", "cluster", "(.*)")
+        for: 15m
+        labels:
+          severity: critical
+          cluster: "{{ $labels.dest_cluster }}"
+        annotations:
+          summary: "Argo CD application {{ $labels.name }} is Degraded"
+          description: >-
+            Application {{ $labels.name }} (project {{ $labels.project }}, destination
+            namespace {{ $labels.dest_namespace }}) has been Degraded for 15m -- Argo
+            applied the manifests but the workload itself is unhealthy. This is a
+            broken deployment, not drift.
+
+      # increase() over a counter: catches a sync that failed and was not retried
+      # into success. `for: 5m` rides out Argo's own retry backoff.
+      - alert: PlatformArgoCDSyncFailed
+        expr: |
+          (
+            increase(argocd_app_sync_total{phase=~"Failed|Error"}[15m])
+              * on (dest_server) group_left (dest_cluster) platform:argocd_dest_cluster:info
+            or on (exported_namespace, name, phase)
+            label_replace(increase(argocd_app_sync_total{phase=~"Failed|Error"}[15m]), "dest_cluster", "$1", "cluster", "(.*)")
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+          cluster: "{{ $labels.dest_cluster }}"
+        annotations:
+          summary: "Argo CD sync failing for {{ $labels.name }}"
+          description: >-
+            {{ $value | humanize }} failed sync attempts for application
+            {{ $labels.name }} in the last 15m. The release in git is not on the
+            cluster. The sync error text is in the Argo CD UI -- metrics cannot carry
+            it.
+
+      # sync_status="Unknown" is ComparisonError: Argo cannot even determine the
+      # desired state (repo unreachable, bad ref, manifest will not render -- which
+      # is also how a failed `fail` guard in one of these charts shows up). It never
+      # produces a FAILED sync, so the alert above cannot see it.
+      - alert: PlatformArgoCDComparisonError
+        expr: |
+          argocd_app_info{sync_status="Unknown"}
+            * on (dest_server) group_left (dest_cluster) platform:argocd_dest_cluster:info
+          or on (exported_namespace, name)
+          label_replace(argocd_app_info{sync_status="Unknown"}, "dest_cluster", "$1", "cluster", "(.*)")
+        for: 15m
+        labels:
+          severity: warning
+          cluster: "{{ $labels.dest_cluster }}"
+        annotations:
+          summary: "Argo CD cannot compare {{ $labels.name }} against git"
+          description: >-
+            Application {{ $labels.name }} has been in sync_status=Unknown for 15m.
+            Argo cannot reach the repo or cannot render its manifests, so it is not
+            merely out of date -- it is blind. Check the repo credentials, the
+            values files the Application names, and the repo-server logs.
+
+      # argocd_cluster_connection_status carries server + k8s_version only; the
+      # cluster's Argo name is on argocd_cluster_info, from the same collector in
+      # the same scrape, so the join on server never half-matches. `*` binds
+      # before `==`, so the comparison applies to the joined result. Argo emits
+      # these only for clusters that have at least one Application (a cluster
+      # registered with none yet is not covered). Read live.
+      #
+      # `cluster` is OVERRIDDEN with Argo's name for the target: the series carry
+      # cluster=hub-dev (where the controller runs), and a notification
+      # "PlatformClusterUnreachable @ hub-dev" when prod is down would read as
+      # the hub being down. The override also groups one notification per
+      # cluster and makes the Silence link match the right one. Argo's name for
+      # the demo cluster is product-a-demo, not aks-product-a-demo.
+      #
+      # KNOWN NIGHTLY FIRING: aks-org-prod (off 18:00-06:00 local and at
+      # weekends) and aks-product-a-demo (observed off 19:00-07:00 local) are
+      # stopped on a schedule, so this fires for both every evening and resolves
+      # every morning. Accepted rather than muting or excluding them;
+      # if that noise must go, an Alertmanager mute_time_interval on the route is
+      # the fix, not this rule.
+      - alert: PlatformClusterUnreachable
+        expr: |
+          argocd_cluster_connection_status
+          * on (server) group_left (name) argocd_cluster_info
+          == 0
+        for: 10m
+        labels:
+          severity: critical
+          cluster: "{{ $labels.name }}"
+        annotations:
+          summary: "Argo CD cannot reach cluster {{ $labels.name }}"
+          description: >-
+            Argo CD on the hub has had no working connection to {{ $labels.name }}
+            ({{ $labels.server }}) for 10m. Nothing syncs or self-heals there until
+            it returns. If the cluster is up, check its API endpoint from the hub
+            and the argocd-manager token / CA in the argocd-cluster-registry
+            Secret; for an agent spoke PlatformClusterSilent fires alongside.

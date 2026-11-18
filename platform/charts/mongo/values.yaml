@@ -1,0 +1,413 @@
+# mongo -- BASE values (shared across all clusters)
+#
+# Standalone MongoDB for the company services. This file holds the settings that are
+# the SAME in every environment. Per-environment facts (vault, identity, disk size,
+# resources, the backup destination) live in the gitops repo:
+#   platform/values/<cluster>/mongo.yaml
+
+replicaCount: 1        # standalone mongod -- see "Why standalone" in the platform/charts README (mongo)
+
+image:
+  repository: mongo
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to Chart.appVersion -- an exact patch, never a floating 8.0
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ============================================================================
+# Container args
+# ============================================================================
+# `mongod` is stated EXPLICITLY as arg one instead of relying on the image
+# entrypoint's leading-dash fixup (`if [ "${1:0:1}" = '-' ]; then set -- mongod "$@"`).
+# The entrypoint only runs its root-user bootstrap when arg one is literally `mongod`,
+# so quietly depending on that rewrite ordering is a way to end up with an auth-enabled
+# database that contains no users at all -- mongod starts, every client is rejected, and
+# nothing in the logs points at the cause.
+#
+#   --bind_ip_all  listen on every interface. mongod's default is localhost-only, which
+#                  in a pod means the Service has endpoints but every connection is refused.
+#   --auth         enforce authentication. The entrypoint would add this implicitly once
+#                  MONGO_INITDB_ROOT_USERNAME/PASSWORD are set, but implicit security is
+#                  security you cannot see in `kubectl get sts -o yaml`.
+#
+# Append to this list (or use extraArgs) for tuning, e.g. --wiredTigerCacheSizeGB.
+args:
+  - mongod
+  - --bind_ip_all
+  - --auth
+
+# Extra mongod flags appended after `args`, for overlays that need to tune one thing
+# without restating the whole list (Helm REPLACES lists, it does not merge them).
+extraArgs: []
+  # - --wiredTigerCacheSizeGB=1.5
+
+# ============================================================================
+# Administrative credentials
+# ============================================================================
+# The admin user is created by the image entrypoint from MONGO_INITDB_ROOT_USERNAME /
+# MONGO_INITDB_ROOT_PASSWORD.
+#
+# The env var names are fixed by the image and say ROOT, but that refers to the ROLE the
+# created user is granted (`root` in the admin database), not to its name. The name is
+# whatever auth.username says -- `mongo-admin` here. Do not rename the env vars to match
+# the user; the entrypoint reads those exact strings and ignores anything else.
+#
+# READ THIS BEFORE CHANGING A PASSWORD 
+# Those two variables are honoured ONLY on the very first boot, while /data/db still has
+# no database marker files. Once the PVC holds a database they are read and then IGNORED.
+# Changing the value (in this file, or in Key Vault) and restarting the pod does NOT
+# change the password in the database. See "Rotating the admin password" in the platform/charts README (mongo) --
+# rotation is a two-step runbook, and this is why `reloader.enabled` defaults to false.
+#
+# The password comes one of two ways -- never from this file:
+# 1. azureKeyVault + CSI driver (default)
+# 2. a pre-created Secret (auth.existingSecret, keys mongo-username / mongo-password)
+auth:
+  username: "mongo-admin"
+  # authSource -- the database the admin user is defined in. Clients must pass this as
+  # ?authSource=admin (or --authenticationDatabase admin); connecting to any other db
+  # without it fails with "Authentication failed" even when the password is correct.
+  database: "admin"
+  # Required when azureKeyVault.enabled is false.
+  existingSecret: ""
+
+service:
+  type: ClusterIP
+  port: 27017
+
+persistence:
+  enabled: true
+  # Required (the template refuses empty): platform-retain on AKS, so deleting the
+  # PVC does not delete the disk.
+  storageClass: platform-retain
+  accessMode: ReadWriteOnce
+  size: 8Gi
+  # If existingClaim is set, the StatefulSet uses this PVC instead of creating new ones
+  existingClaim: ""
+
+# Default (dev-sized) resources. Prod bumps these in its overlay.
+#
+# Sizing note: WiredTiger's cache is max(0.5 x (RAM - 1GiB), 256MiB) and mongod reads the
+# cgroup limit, not host RAM. At a 1Gi limit that floors at 256MiB and leaves very little
+# for connections and the process itself -- fine for a smoke test, not for real data.
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
+
+# Stakater Reloader -- watches ConfigMap/Secret changes and restarts pods.
+#
+# DELIBERATELY OFF, and it stays off in every cluster's values too. This diverges from
+# rabbitmq and keycloak, which both enable it, and the divergence is the
+# whole point: for those two a restart re-reads the rotated credential and it takes effect.
+# For MongoDB it does not. MONGO_INITDB_ROOT_PASSWORD applies only to an empty data
+# directory, so a Reloader-triggered restart after a Key Vault rotation gives you a pod
+# holding a new password that mongod discards, while every client that picked up the
+# rotated Secret is now locked out of a database whose password never changed.
+#
+# That failure is worse than no automation, because the restart makes it LOOK like the
+# rotation worked. Rotation here is the runbook in the platform/charts README (mongo): change it in mongod first,
+# then in the vault.
+#
+# If you do enable this: the appsets' ignoreDifferences must cover kind: StatefulSet (they
+# do), or selfHeal fights Reloader's last-reloaded-from annotation forever.
+reloader:
+  enabled: false
+  mode: auto            # watch mode: auto (by annotation) or all (all Deployments/StatefulSets)
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+priorityClassName: system-cluster-critical
+
+# The ServiceAccount mongod runs as (Key Vault workload identity).
+serviceAccount:
+  create: true
+  name: ""
+
+# Clean mongod shutdown: SIGTERM triggers a checkpoint and journal flush. Too short a
+# grace period turns that into SIGKILL and forces recovery-on-next-start.
+terminationGracePeriodSeconds: 60
+
+# ============================================================================
+# Pod / container security context
+# ============================================================================
+# The official mongo image ships no USER directive: it starts as root and its entrypoint
+# drops to the `mongodb` user (uid 999) with gosu, chowning /data/db on the way.
+#
+# Pinning runAsUser skips BOTH of those -- the gosu drop and the chown. The chown is the
+# one that matters: an Azure managed disk arrives root-owned, and mongod as uid 999 dies
+# on the lock file with "Permission denied ... /data/db/mongod.lock". fsGroup is what
+# replaces it -- the kubelet applies group ownership + setgid to the volume at mount time,
+# which the Azure Disk CSI driver honours.
+#
+# So podSecurityContext.fsGroup and securityContext.runAsUser are a matched pair: setting
+# one without the other is the broken configuration.
+#
+# fsGroupChangePolicy is the second half of that story. The default, Always, makes the
+# kubelet walk the ENTIRE volume on EVERY mount -- chown :999 on every inode, plus g+rw on
+# files and g+rwx+setgid on directories -- synchronously, before the container starts.
+# WiredTiger stores one file per collection AND per index, so that walk grows with the
+# data and runs against network-attached storage. It is the classic cause of a database
+# pod sitting in ContainerCreating for minutes with no event explaining why.
+#
+# OnRootMismatch stats only the volume's top-level directory: if it already has GID 999
+# and the setgid+rwx bits, the whole recursive pass is skipped. The first mount still
+# mismatches (a fresh Azure disk is root:root) and does the full pass on an empty volume,
+# so nothing about initial provisioning changes -- and changing fsGroup later re-triggers
+# it once. On this cluster that matters more than usual: the power schedule in the
+# cluster's IaC stops and starts it every weekday, so this is ~250 remounts a year,
+# not a rare event.
+#
+# The one assumption it makes: that a correct root dir implies a correct tree. True here --
+# mongod is the sole writer, runs as 999, and setgid dirs propagate the group to every
+# file it creates. NOT true if you restore a dump into the PVC as root while the pod is
+# down; see "Restoring into the volume" in the platform/charts README (mongo).
+podSecurityContext:
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+securityContext:
+  runAsUser: 999
+  runAsGroup: 999
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ============================================================================
+# Probes
+# ============================================================================
+# Rendered with `omit <probe> "enabled"`, so every field below except `enabled` is passed
+# through to the container verbatim -- add any probe field without touching the template.
+#
+# Why `ping` and not a real query: MongoDB rejects almost every command from an
+# unauthenticated connection once --auth is on, but `ping` is one of the handful that is
+# explicitly allowed pre-auth. That makes it the only useful probe that does not require
+# putting the admin password into the probe command line (where it would show up in
+# `kubectl describe pod`). mongosh ships in the official image from 6.0 onward.
+#
+# startup  -- exec, generous budget: first boot has to run the entrypoint's user bootstrap.
+# readiness-- exec, so the Service only gets endpoints once mongod answers commands.
+# liveness -- tcpSocket on purpose. mongosh is a Node process (~1-2s, tens of MB per run);
+#            running it as liveness under memory pressure risks a probe timeout killing a
+#            database that is merely busy. The port disappearing is the signal worth acting on.
+startupProbe:
+  enabled: true
+  exec:
+    command:
+      - mongosh
+      - --quiet
+      - --eval
+      - "db.adminCommand('ping').ok"
+  periodSeconds: 5
+  failureThreshold: 30      # 150s budget for first-boot initdb
+  timeoutSeconds: 5
+
+readinessProbe:
+  enabled: true
+  exec:
+    command:
+      - mongosh
+      - --quiet
+      - --eval
+      - "db.adminCommand('ping').ok"
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  enabled: true
+  tcpSocket:
+    port: mongodb
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# ============================================================================
+# Scheduled backup -- mongodump to Azure Blob Storage
+# ============================================================================
+# A CronJob that dumps the whole database to a single gzipped archive and uploads it to a
+# blob container. Two containers, in order:
+#   initContainer `mongodump`  -> writes /backup/mongo-<UTC timestamp>.archive.gz
+#   container     `upload`     -> az storage blob upload, then the pod exits
+# The dump lands on an emptyDir, so nothing is persisted in-cluster and a failed upload
+# leaves no orphaned data behind.
+#
+# THE SCHEDULE IS CONSTRAINED BY THE CLUSTER POWER SCHEDULE.
+# The cluster's IaC automation stops it at 18:00 and starts it at 06:00, weekdays only. A
+# backup outside 06:00-18:00 Mon-Fri never runs at all -- the usual "0 2 * * *" would
+# silently never fire. 17:00 gives the dump a one-hour margin before the node deallocates.
+#
+# timeZone is load-bearing, not cosmetic. Without it the CronJob controller interprets the
+# schedule in UTC, and the DST swing would put "17:00" at 18:00 local for half the year --
+# i.e. starting the backup exactly as the cluster shuts down. Requires Kubernetes
+# >= 1.27 (stable); AKS is well past that.
+backup:
+  enabled: false
+
+  schedule: "0 17 * * 1-5"      # 17:00 on weekdays, one hour before the 18:00 shutdown
+  timeZone: "Europe/Amsterdam"  # must match the power schedule's timezone in the cluster IaC
+
+  # Forbid: never start a second dump while one is still running. A backup that overruns
+  # into the next day's window is a problem to fix, not to compound.
+  concurrencyPolicy: Forbid
+
+  # Do not start a run more than 30 min late. Past 17:30 there is not enough runway before
+  # the node deallocates, and a half-uploaded archive is worse than a skipped one.
+  startingDeadlineSeconds: 1800
+
+  # Hard cap on a single run: 45 min. Guarantees the Job is gone before 18:00 even if
+  # mongodump wedges. Applied to the Job, so it kills the pod rather than just the retry loop.
+  activeDeadlineSeconds: 2700
+
+  backoffLimit: 2
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  # Dump image. Empty = reuse the mongod image/tag above, which is already present on the
+  # node so the CronJob adds no pull. mongodump ships in the official mongo image via the
+  # mongodb-database-tools package; verify with `mongodump --version` if you change this.
+  image:
+    repository: ""
+    tag: ""
+
+  # Uploader image. Microsoft's Azure CLI image -- the mongo image has no `az`.
+  azureCliImage: "mcr.microsoft.com/azure-cli:2.77.0"   # pinned; never `latest`
+
+  # Scratch space for the archive. Sized to hold one full compressed dump; if it fills,
+  # mongodump fails with a disk error rather than corrupting anything. It consumes node
+  # ephemeral storage, so keep it well under the OS disk (128 GiB on this node pool).
+  scratchSizeLimit: 16Gi
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+
+  # Extra flags appended to mongodump, e.g. ["--excludeCollection=sessions"].
+  extraDumpArgs: []
+
+  # ---------------------------------------------------------------------------
+  # ServiceAccount the backup job runs as
+  # ---------------------------------------------------------------------------
+  # Dedicated, and created even while backup.enabled is false, because the Azure
+  # federated credential in the cluster's IaC binds to it BY NAME and it is worth having
+  # the cluster side in place before the backup is switched on.
+  #
+  # The subject to put in the federated credential is:
+  #   system:serviceaccount:<namespace>:<name below>
+  # e.g.  system:serviceaccount:mongo:mongo-backup
+  #
+  # Do NOT point that at the namespace `default` SA -- it would let every pod in the
+  # namespace, mongod included, assume the storage identity.
+  serviceAccount:
+    create: true
+    name: ""            # "" = <fullname>-backup, e.g. mongo-backup
+    annotations: {}
+      # Required for authMode: workloadIdentity. CLIENT id of the user-assigned managed
+      # identity tofu creates, NOT its principal/object id:
+      # azure.workload.identity/client-id: "<identity CLIENT id>"
+
+  # ---------------------------------------------------------------------------
+  # Azure Blob Storage destination
+  # ---------------------------------------------------------------------------
+  # The chart REFUSES TO RENDER if backup.enabled is true while these are unset, so a
+  # half-configured backup cannot be deployed and quietly do nothing.
+  azure:
+    # Storage account name (not the full URL, not the resource ID).
+    accountName: ""
+
+    # Blob container inside that account. Created ahead of time; the job does not create it.
+    containerName: "mongo-backups"
+
+    # How the uploader authenticates:
+    #   workloadIdentity -- BEST. A user-assigned MI federated to the backup ServiceAccount
+    #                      only, holding "Storage Blob Data Contributor" on the account.
+    #                      No secret anywhere, and the identity is scoped to ONE
+    #                      ServiceAccount rather than the whole node. Needs tofu to create
+    #                      the MI + federated credential + role assignment, and the MI's
+    #                      client id in backup.serviceAccount.annotations. The storage
+    #                      side grants a custom role WITHOUT delete, so even this
+    #                      identity cannot remove an archive.
+    #   connectionString -- read from the CSI-synced Secret. Matches how every other secret
+    #                      in this fleet is delivered and needs no cluster or tofu change.
+    #                      Add an entry to azureKeyVault.secrets below with
+    #                      env: AZURE_STORAGE_CONNECTION_STRING. An account-key connection
+    #                      string is full control of the whole storage account, including
+    #                      delete -- a poor fit for a backup destination. Prefer a
+    #                      container-scoped, append-only SAS if you go this route.
+    #   managedIdentity  -- `az login --identity` as the kubelet MI. No secret, but any pod
+    #                      that can reach IMDS can borrow the node's identity, which is a
+    #                      strictly weaker posture than workloadIdentity for the same work.
+    authMode: workloadIdentity
+
+    # Blob name prefix. The job appends mongo-<UTC timestamp>.archive.gz.
+    prefix: ""
+
+    # Uploads use --overwrite false, so a repeated run cannot clobber an existing archive.
+    # RETENTION IS NOT DONE HERE. Use an Azure Blob lifecycle management rule on the
+    # container -- it is server-side, free, and cannot fail halfway like a delete-batch
+    # inside this job could.
+
+# ============================================================================
+# Azure Key Vault + Secrets Store CSI Driver integration
+# ============================================================================
+# The admin password comes from Azure Key Vault via the Secrets Store CSI driver. The
+# driver mirrors the vault secret into a Kubernetes Secret via a SecretProviderClass
+# (templates/secretproviderclass.yaml), which only exists while the pod mounts it.
+azureKeyVault:
+  enabled: true
+
+  # workloadIdentity (default): mongod's own ServiceAccount, federated.
+  # vmManagedIdentity: the kubelet identity -- any pod on the node can borrow it.
+  # servicePrincipal: static credential Secret (on-prem without an OIDC issuer).
+  authMode: workloadIdentity
+  credentialsSecretName: ""
+
+  # Required for vmManagedIdentity mode: the CLIENT id of the kubelet managed identity.
+  # NOT the object/principal id (different GUIDs!). From 'tofu output kubelet_client_id'.
+  kubeletClientId: ""
+
+  # Required for workloadIdentity mode: the CLIENT id of a user-assigned managed identity
+  # that the pod's ServiceAccount is federated to.
+  workloadIdentityClientId: ""
+
+  # Azure tenant id (always required).
+  tenantId: ""
+
+  # Name of the Key Vault (without environment -- the same vault holds secrets for a given cluster).
+  keyvaultName: ""
+
+  # Prefix for secrets in Key Vault. Mongo creds are stored as <secretPrefix>--<kvName>,
+  # e.g. "mongo--admin-password". The CSI driver resolves these to a Kubernetes Secret.
+  secretPrefix: "mongo"
+
+  # Kubernetes Secret name that the CSI driver syncs the vault secrets into.
+  # The StatefulSet reads the admin password from this Secret.
+  syncedSecretName: "mongo-kv-sync"
+
+  # SecretProviderClass name. The StatefulSet mounts the CSI volume using this class.
+  secretProviderClassName: "mongo-secret-provider"
+
+  # List of secrets to sync from Key Vault into the Kubernetes Secret.
+  # Each entry maps a vault object (kvName) to a K8s Secret key (key) and container env var (env).
+  # The template builds vault object names as <secretPrefix>--<kvName>.
+  #
+  # Exactly one entry MUST carry env: MONGO_INITDB_ROOT_PASSWORD -- the chart looks the
+  # password key up by that env name and fails the render if it is absent.
+  secrets:
+    - kvName: admin-password
+      key: mongoAdminPassword
+      env: MONGO_INITDB_ROOT_PASSWORD

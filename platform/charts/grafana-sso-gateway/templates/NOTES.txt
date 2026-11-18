@@ -1,0 +1,21 @@
+grafana-sso-gateway installed into namespace: {{ .Release.Namespace }}
+
+Exposure (Gateway API via Traefik):
+{{- range $name, $r := .Values.routes }}
+{{- if $r.enabled }}
+  - https://{{ $.Values.domain }}{{ $r.pathPrefix }}  ->  {{ $r.service }}:{{ $r.port }}
+{{- end }}
+{{- end }}
+{{- if .Values.oidc.enabled }}
+
+Keycloak OIDC for Grafana:
+  issuer:       {{ include "grafana-sso-gateway.issuer" . }}
+  client id:    {{ .Values.oidc.clientId }}
+  redirect URI: {{ .Values.oidc.grafana.rootUrl }}/login/generic_oauth
+
+  1) The client exists in realm "{{ .Values.oidc.keycloak.realm }}" with that redirect URI
+     (confidential, standard flow) -- provisioned by the Keycloak realm IaC.
+  2) Grafana loads "{{ .Values.oidc.secretName }}" via envFromSecrets AND the hand-seeded
+     client secret via envValueFrom (see values.yaml), then restarts:
+       kubectl -n {{ .Release.Namespace }} rollout restart deploy/kube-prom-stack-grafana
+{{- end }}

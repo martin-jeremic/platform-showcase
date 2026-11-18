@@ -1,0 +1,35 @@
+# =============================================================================
+# oidc-issuer -- COMMON values
+# =============================================================================
+# The issuer URL is  https://<route.hostname><route.pathPrefix>
+#
+# It MUST equal, byte for byte, the FIRST --service-account-issuer flag of the
+# cluster's kube-apiserver (/var/snap/microk8s/current/args/kube-apiserver), and
+# --service-account-jwks-uri must be that URL + /openid/v1/jwks. Entra compares the
+# token's `iss` claim with the federated credential's issuer exactly; a mismatch
+# fails every token exchange. Keep the old issuer as the SECOND flag, so tokens
+# minted before the change stay valid until they expire:
+#   --service-account-issuer=https://dev.example.com/k8s-issuer
+#   --service-account-issuer=https://kubernetes.default.svc
+#   --service-account-jwks-uri=https://dev.example.com/k8s-issuer/openid/v1/jwks
+#
+# What it unlocks on the hub: Argo CD's repo-server reads Azure DevOps with a
+# federated managed identity instead of a PAT (gitops setup/ repo-creds), and
+# on-prem workloads use workload identity for Key Vault instead of a
+# service-principal secret.
+#
+# Install into namespace `default` only: the backend is Service `kubernetes`,
+# which lives there (the templates fail the render otherwise).
+# =============================================================================
+
+gateway:
+  # The Gateway the route attaches to. Per cluster.
+  name: ""
+  namespace: ""
+  sectionName: websecure
+
+route:
+  # Public host Entra fetches the discovery document from. Per cluster.
+  hostname: ""
+  # Path the issuer lives under. No trailing slash.
+  pathPrefix: /k8s-issuer

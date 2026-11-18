@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "postgres-exporter.fullname" . }}
+  labels:
+    {{- include "postgres-exporter.labels" . | nindent 4 }}
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    # Restart when the KV-synced Secret rotates. The exporter reads its
+    # environment once at process start, so a rotated password would otherwise
+    # not take effect until something else happened to restart the pod.
+    reloader.stakater.com/auto: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "postgres-exporter.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "postgres-exporter.selectorLabels" . | nindent 8 }}
+        {{- if and .Values.azureKeyVault.enabled (eq .Values.azureKeyVault.authMode "workloadIdentity") }}
+        # Required for Azure Workload Identity. Without this label the mutating
+        # webhook never injects the projected SA token, and the CSI mount fails
+        # even though the ServiceAccount annotation and the federated credential
+        # are both correct.
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "postgres-exporter.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres-exporter
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # The DSN in three pieces. URI and user are non-secret and come from
+            # the cluster overlay; the password is the only secret and comes from
+            # the Secret the CSI driver syncs out of Key Vault.
+            - name: DATA_SOURCE_URI
+              value: {{ required "datasource.uri is required — set it in the cluster overlay" .Values.datasource.uri | quote }}
+            - name: DATA_SOURCE_USER
+              value: {{ required "datasource.user is required — set it in the cluster overlay" .Values.datasource.user | quote }}
+            {{- if .Values.azureKeyVault.enabled }}
+            {{- range .Values.azureKeyVault.secrets }}
+            {{- if eq .kvName "password" }}
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.azureKeyVault.syncedSecretName }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          ports:
+            - name: http-metrics
+              containerPort: 9187
+              protocol: TCP
+          # The exporter's root path is a landing page served by the same HTTP
+          # listener as /metrics, so it proves the process is up. It does NOT
+          # prove the database connection — that is what pg_up reports, and a
+          # failed connection is a monitoring signal rather than a reason to
+          # restart the pod.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- if .Values.azureKeyVault.enabled }}
+          volumeMounts:
+            # The mount is what makes the CSI driver create and refresh the
+            # synced Secret. Without it the secretKeyRef above points at a Secret
+            # that never comes into existence, and the pod stays in
+            # ContainerCreating.
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.azureKeyVault.enabled }}
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.azureKeyVault.secretProviderClassName }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

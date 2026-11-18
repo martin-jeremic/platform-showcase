@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "producta-runtime"
+version = "0.1.0"
+description = "Shared runtime for Product A's Python services: JSON log contract and the gunicorn config."
+# Deliberately no `readme = "README.md"`: the root .dockerignore excludes **/README.md, so the file
+# is absent from the Docker build context and `pip install` inside the image would fail with a
+# packaging error that points nowhere near the cause.
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]

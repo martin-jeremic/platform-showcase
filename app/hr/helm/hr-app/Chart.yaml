@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hr-app
+description: Shared chart for the four HR SPAs (hr-portal, hr-admin, hr-absence, hr-employee-book). One release per app.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

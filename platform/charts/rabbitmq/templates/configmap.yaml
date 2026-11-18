@@ -1,0 +1,24 @@
+{{- /*
+rabbitmq.conf drop-in for the Prometheus plugin.
+
+The image reads /etc/rabbitmq/conf.d/*.conf in lexical order, and its entrypoint
+WRITES 10-defaults.conf there from RABBITMQ_DEFAULT_USER/PASS. This file is
+numbered 20- so it sorts after that one, and the StatefulSet mounts it with
+subPath for the same reason: mounting the whole conf.d directory would shadow
+10-defaults.conf, and the broker would come up with no configured user -- an
+authentication failure that looks nothing like a metrics change.
+*/ -}}
+{{- if and .Values.metrics.enabled .Values.metrics.perObjectMetrics }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rabbitmq.fullname" . }}-config
+  labels:
+    {{- include "rabbitmq.labels" . | nindent 4 }}
+data:
+  20-prometheus.conf: |
+    # Emit rabbitmq_queue_* with queue and vhost labels on the aggregated
+    # /metrics endpoint. Off, those families are broker-wide totals with no
+    # labels, and every queue-level dashboard panel has nothing to group by.
+    prometheus.return_per_object_metrics = true
+{{- end }}

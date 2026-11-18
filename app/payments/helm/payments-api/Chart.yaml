@@ -1,0 +1,6 @@
+apiVersion: v2
+name: payments-api
+description: Payments API (checkout, orchestration, admin, outbound webhooks). One of three backend charts sharing one templates/ dir.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

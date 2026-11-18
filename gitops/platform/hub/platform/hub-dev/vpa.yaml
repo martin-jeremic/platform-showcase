@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'vpa' to 'hub-dev'.
+chartPath:     vpa
+chartRevision: vpa-0.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   vpa
+namespace:     vpa
+syncWave:      "1"

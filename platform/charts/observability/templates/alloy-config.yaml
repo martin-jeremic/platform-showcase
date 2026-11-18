@@ -1,0 +1,24 @@
+{{/*
+Alloy's pipeline, supplied as our own ConfigMap (1.4.0).
+
+Why not the subchart's `alloy.configMap.content`: that value is rendered through
+`tpl`, so a River config living in a values file becomes a live templating
+surface — Alloy's own syntax has no `{{ }}`, but any stray brace or a future
+`{{` in a log-path regex would be evaluated by Helm instead of passed through.
+Owning the ConfigMap here keeps the config out of `tpl` entirely.
+
+The name is derived, not hardcoded — see observability.alloyFullname.
+*/}}
+{{- if .Values.components.alloy }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "observability.alloyFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+data:
+  # Key must match alloy.alloy.configMap.key in values.yaml (config.alloy).
+  config.alloy: |
+    {{- include "observability.alloyConfig" . | nindent 4 }}
+{{- end }}

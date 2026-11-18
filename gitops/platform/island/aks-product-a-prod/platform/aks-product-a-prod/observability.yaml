@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'observability' to 'aks-product-a-prod'.
+chartPath:     observability
+chartRevision: observability-3.4.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   observability
+namespace:     observability
+syncWave:      "6"

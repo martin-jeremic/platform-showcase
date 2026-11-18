@@ -1,0 +1,10 @@
+# Env descriptor read by the `services` ApplicationSet. Its PRESENCE deploys ordering-api to dev.
+# chart.version is written by the CD promotion; chart.name and destination are hand-seeded once.
+chart:
+  name: "ordering-api"
+  version: "0.8.1"
+# dev = the hub itself, addressed in-cluster. `name` stays present and empty: missingkey=error.
+destination:
+  server: "https://kubernetes.default.svc"
+  name: ""
+  namespace: ordering

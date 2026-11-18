@@ -1,0 +1,6 @@
+apiVersion: v2
+name: product-b-api
+description: Product B api (stub chart; deploy-model highlights only).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

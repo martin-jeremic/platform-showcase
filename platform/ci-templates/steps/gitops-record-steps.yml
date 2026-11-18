@@ -1,0 +1,153 @@
+# steps/gitops-record-steps.yml
+#
+# Record a freshly built image as the Dev candidate in the GitOps repo:
+#   apps/<imageName>/<targetEnv>/image.yaml   <- { image: { digest, version } }
+#   apps/<pairedImageName>/<targetEnv>/image.yaml (optional, SAME digest, SAME commit)
+#
+# This record is what the approval-gated Promote_* stages later copy. Nothing reads it as a
+# deployment by itself (dev is deployed push-based by the service's CD pipeline).
+#
+# Used by stages/build-or-promote-stage.yml on the build branch. The enclosing job must declare
+#   uses: { repositories: [ gitops ] }
+# because "Protect access to repositories in YAML pipelines" is on: the job token only covers
+# repositories the job explicitly uses (see the note in build-or-promote-stage.yml).
+#
+# Two steps on purpose:
+#   1. AzureCLI@2 resolves the digest. Its OWN task, so it gets a fresh workload-identity
+#      client assertion (10-minute lifetime) no matter how long the image build took.
+#   2. Plain bash writes and pushes the record. It needs no Azure login at all.
+
+parameters:
+  - name: imageName
+    type: string
+  # A second app folder that runs the SAME image (e.g. the migration Job chart that ships the
+  # API image). Recorded with the identical digest/version in the same commit, so the pair can
+  # never be promoted from two different builds.
+  - name: pairedImageName
+    type: string
+    default: ''
+  - name: version
+    type: string
+  - name: acrName
+    type: string
+  - name: armServiceConnection
+    type: string
+  - name: gitopsRepoUrl
+    type: string
+  - name: gitopsBranch
+    type: string
+    default: main
+  - name: targetEnv
+    type: string
+    default: dev
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - template: yq-install-steps.yml
+    parameters:
+      condition: ${{ parameters.condition }}
+
+  - task: AzureCLI@2
+    displayName: Resolve image digest (${{ parameters.imageName }})
+    condition: ${{ parameters.condition }}
+    env:
+      ACR_NAME: ${{ parameters.acrName }}
+      IMAGE: ${{ parameters.imageName }}
+      VERSION: ${{ parameters.version }}
+    inputs:
+      azureSubscription: ${{ parameters.armServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        DIGEST="$(az acr repository show --name "$ACR_NAME" --image "$IMAGE:$VERSION" --query digest -o tsv)"
+        # Only a content address may be recorded. A tag, an empty string or an error message
+        # captured by $(...) would otherwise become the "validated candidate" of every env.
+        if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "##vso[task.logissue type=error]Could not resolve a valid digest for $IMAGE:$VERSION (got: '$DIGEST')."
+          exit 1
+        fi
+        echo "Digest of $IMAGE:$VERSION = $DIGEST"
+        echo "##vso[task.setvariable variable=recordedDigest]$DIGEST"
+
+  - bash: |
+      set -euo pipefail
+
+      # Token only ever travels as a per-command header; it is never written to .git/config,
+      # and the temporary clone is removed however this step ends.
+      git_auth() { git -c http.extraheader="AUTHORIZATION: bearer ${SYSTEM_ACCESSTOKEN}" "$@"; }
+      WORKDIR="$(mktemp -d)"
+      trap 'rm -rf "$WORKDIR"' EXIT
+
+      if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "##vso[task.logissue type=error]No valid digest to record (got: '$DIGEST')."
+        exit 1
+      fi
+
+      git_auth clone --quiet --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$WORKDIR/gitops"
+      cd "$WORKDIR/gitops"
+      git config user.name "ci-bot"
+      git config user.email "ci-bot@example.com"
+
+      write_record() {
+        local app="$1" note="$2" file="apps/$1/$TARGET_ENV/image.yaml"
+        mkdir -p "$(dirname "$file")"
+        {
+          echo "# Managed by CI (gitops-record-steps.yml). Do not edit by hand."
+          echo "# The validated $TARGET_ENV candidate that the approval-gated Promote stages ship.$note"
+          yq -n '.image.digest = strenv(DIGEST) | .image.version = strenv(VERSION) | .image.* style="double"'
+        } > "$file"
+        git add "$file"
+      }
+
+      write_record "$IMAGE" ""
+      if [ -n "$PAIRED" ]; then
+        # The paired chart has no image of its own: it runs THIS image. Identical digest in the
+        # same commit is what makes the pin-consistency lint in the GitOps repo meaningful.
+        write_record "$PAIRED" $'\n'"# Same digest as apps/$IMAGE/$TARGET_ENV/image.yaml on purpose: this chart runs $IMAGE's image."
+      fi
+
+      if git diff --cached --quiet; then
+        echo "Record unchanged; nothing to commit."
+        exit 0
+      fi
+      git commit --quiet -m "record $IMAGE -> $TARGET_ENV: $DIGEST ($VERSION)${PAIRED:+ (+ $PAIRED)}"
+
+      # Every service's CI writes into this ONE branch, so two pipelines finishing within the
+      # same seconds clone the same tip and race. The loser used to fail with
+      #   TF401028: The reference 'refs/heads/main' has already been updated by another client
+      # and a red stage told nobody that the image WAS built and pushed; only the record was lost,
+      # so the next deploy silently shipped the previous image.
+      #
+      # Each build touches only apps/<its own app>/..., so rebasing onto the new tip is
+      # conflict-free by construction. This is a retry, not a merge strategy: a real conflict
+      # means that assumption stopped holding, and it fails loudly instead of resolving anything.
+      for attempt in 1 2 3 4 5; do
+        if git_auth push --quiet origin "HEAD:$REPO_BRANCH"; then
+          echo "Recorded $IMAGE -> $TARGET_ENV on $REPO_BRANCH (attempt $attempt)."
+          exit 0
+        fi
+        echo "Push rejected: $REPO_BRANCH moved. Rebasing (attempt $attempt of 5)."
+        git_auth fetch --quiet --depth 50 origin "$REPO_BRANCH"   # deepen enough to hold the merge base
+        if ! git rebase --quiet FETCH_HEAD; then
+          git rebase --abort || true
+          echo "##vso[task.logissue type=error]The record for $IMAGE conflicts with another commit on $REPO_BRANCH. The image IS in the registry ($DIGEST); only its record is missing. Re-run this stage."
+          exit 1
+        fi
+        sleep $(( attempt * 3 ))
+      done
+      echo "##vso[task.logissue type=error]Lost the push race on $REPO_BRANCH five times. The image IS in the registry ($DIGEST); only its record is missing. Re-run this stage."
+      exit 1
+    displayName: Record digest in GitOps (${{ parameters.targetEnv }})
+    condition: ${{ parameters.condition }}
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      DIGEST: $(recordedDigest)
+      IMAGE: ${{ parameters.imageName }}
+      PAIRED: ${{ parameters.pairedImageName }}
+      VERSION: ${{ parameters.version }}
+      TARGET_ENV: ${{ parameters.targetEnv }}
+      REPO_URL: ${{ parameters.gitopsRepoUrl }}
+      REPO_BRANCH: ${{ parameters.gitopsBranch }}

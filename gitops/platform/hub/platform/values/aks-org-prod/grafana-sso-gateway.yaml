@@ -1,0 +1,7 @@
+domain: services.example.com
+oidc:
+  keycloak:
+    baseUrl: https://services.example.com/keycloak
+    realm: grafana
+  grafana:
+    rootUrl: https://services.example.com/monitoring/grafana

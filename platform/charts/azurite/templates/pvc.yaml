@@ -1,0 +1,26 @@
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+# Dynamically provisioned, always. The forked chart could also render a static
+# hostPath PersistentVolume pinned to one node (persistence.hostPath); that option
+# is gone -- platform charts never template a PV (tools/check-platform.sh gates on
+# it). A volume left behind by an earlier install is adopted with existingClaim.
+#
+# A bound PVC's spec is immutable: changing persistence.size FAILS the Argo sync
+# until the PVC is deleted (or expanded in place, if the class allows it).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "azurite.fullname" . }}
+  labels:
+    {{- include "azurite.labels" . | nindent 4 }}
+  annotations:
+    # Blob data is test data, but losing it mid-run breaks every consumer at once.
+    argocd.argoproj.io/sync-options: Prune=false
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  storageClassName: {{ required "persistence.storageClass is required: never fall through to the cluster default class" .Values.persistence.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

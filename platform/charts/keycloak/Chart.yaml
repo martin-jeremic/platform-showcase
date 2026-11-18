@@ -1,0 +1,30 @@
+apiVersion: v2
+name: keycloak
+description: >-
+  Keycloak identity and access management -- the platform's own identity
+  provider. Backed by Azure Database for PostgreSQL Flexible Server, running 2
+  clustered replicas via jgroups DNS_PING, with the RabbitMQ event SPI, all
+  secrets from Key Vault over CSI with workload identity.
+type: application
+
+# Version of THIS chart. Bump on any change to templates or defaults; the gitops
+# descriptor pins the matching git tag. Unlike the chart this was forked from, CI
+# does NOT rewrite this at package time -- there is no package step. The value
+# here is the value that ships.
+version: 1.1.1
+
+# The pinned Keycloak base image in the custom image's Dockerfile
+# (ARG KEYCLOAK_VERSION). Keep the two in step.
+#
+# Quoted deliberately: bare 26.7 parses as a YAML float and fails the Chart schema,
+# which requires appVersion to be a string.
+appVersion: "26.7"
+
+keywords:
+  - keycloak
+  - oidc
+  - identity
+  - sso
+home: https://www.keycloak.org/
+sources:
+  - https://github.com/keycloak/keycloak

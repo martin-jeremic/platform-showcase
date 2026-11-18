@@ -1,0 +1,19 @@
+apiVersion: v2
+name: rbac
+description: >
+  Maps Microsoft Entra ID groups to Kubernetes RBAC on an AKS cluster with Entra
+  integration. Config-only: no workload, no image. Renders the application
+  Namespaces, one RoleBinding per namespace binding an Entra group to a built-in
+  ClusterRole, and a cluster-wide namespace-lister so kubectl and GUI tools work.
+  Subjects are Entra group OBJECT IDs -- the AKS API server never sees display
+  names, so a binding written against a display name is inert. The chart refuses
+  to render until real GUIDs are supplied.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - rbac
+  - entra-id
+  - aks
+  - access-control

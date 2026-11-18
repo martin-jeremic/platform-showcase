@@ -1,0 +1,44 @@
+# AppProject for the product-a APPLICATION layer on aks-product-a-prod (island cluster with its
+# own Argo CD in namespace `argocd`).
+#
+# Named `product-a`; the platform layer's project on the same cluster is a separate one. Two
+# projects, two layers, no overlap: this one may only touch namespace `product-a`.
+#
+# Scoped tighter than a hub project ever was: one cluster, one namespace, a known set of charts,
+# so the allow-lists cost nothing and turn "a compromised or mistaken chart can create anything
+# anywhere" into "it cannot".
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: product-a
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: product-a application layer, GitOps-delivered, on aks-product-a-prod
+  sourceRepos:
+    - https://dev.azure.com/example-org/product-a/_git/product-a-gitops
+    - productacr.azurecr.io/helm
+  destinations:
+    # In-cluster, ONE namespace. Not `product-a-prod`: the platform RBAC chart creates and grants
+    # exactly `product-a`, and the appset's destination matches. Change one and the apps land in
+    # a namespace nobody has access to.
+    - server: https://kubernetes.default.svc
+      namespace: product-a
+  # Every application chart renders namespaced kinds only (Deployment, Service, ConfigMap,
+  # ServiceAccount, HTTPRoute, HPA, SecretProviderClass, NetworkPolicy, Job, CronJob). Namespace is
+  # here only for CreateNamespace=true.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  # Namespaced kinds stay open: the single-namespace destination already bounds WHERE anything
+  # can land, and enumerating every kind the charts render would be a list that fails closed on
+  # every chart upgrade.
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  # Argo does not own everything in `product-a` (the platform RBAC chart creates the namespace;
+  # the Key Vault CSI driver writes its synced Secrets). Flagging those as orphans would train
+  # people to ignore the warning.
+  orphanedResources:
+    warn: false

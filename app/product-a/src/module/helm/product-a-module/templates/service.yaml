@@ -1,0 +1,103 @@
+{{- $fullname := include "product-a-module.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "product-a-module.labels" . | nindent 4 }}
+  {{- if .Values.workloadIdentity.enabled }}
+  annotations:
+    azure.workload.identity/client-id: {{ required "workloadIdentity.clientId is required when enabled" .Values.workloadIdentity.clientId | quote }}
+  {{- end }}
+automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "product-a-module.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+  selector:
+    {{- include "product-a-module.selectorLabels" . | nindent 4 }}
+{{- if .Values.azureKeyVault.enabled }}
+---
+{{- /* Same pattern as product-a-api's secretproviderclass.yaml (read that one for the reasoning). */}}
+{{- if not .Values.workloadIdentity.enabled }}
+{{- fail "azureKeyVault.enabled requires workloadIdentity.enabled" }}
+{{- end }}
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: {{ .Values.azureKeyVault.secretProviderClassName }}
+  labels:
+    {{- include "product-a-module.labels" . | nindent 4 }}
+spec:
+  provider: azure
+  secretObjects:
+    - secretName: {{ .Values.azureKeyVault.syncedSecretName }}
+      type: Opaque
+      data:
+        - objectName: product-a-module--llm-api-key
+          key: LlmApiKey
+        - objectName: product-a-module--m2m-client-secret
+          key: M2mClientSecret
+  parameters:
+    usePodIdentity: "false"
+    useVMManagedIdentity: "false"
+    clientID: {{ required "workloadIdentity.clientId is required" .Values.workloadIdentity.clientId | quote }}
+    tenantId: {{ required "azureKeyVault.tenantId is required" .Values.azureKeyVault.tenantId | quote }}
+    keyvaultName: {{ required "azureKeyVault.keyvaultName is required" .Values.azureKeyVault.keyvaultName | quote }}
+    objects: |
+      array:
+        - |
+          objectName: product-a-module--llm-api-key
+          objectType: secret
+        - |
+          objectName: product-a-module--m2m-client-secret
+          objectType: secret
+{{- end }}
+{{- if and .Values.gateway.enabled .Values.route.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "product-a-module.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      {{- with .Values.gateway.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml (required "route.hostnames is required" .Values.route.hostnames) | nindent 4 }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.path | quote }}
+      {{- if .Values.route.rewrite.enabled }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: {{ .Values.route.rewrite.replacePrefixMatch | quote }}
+      {{- end }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $fullname }}
+          port: {{ .Values.service.port }}
+          weight: 1
+{{- end }}

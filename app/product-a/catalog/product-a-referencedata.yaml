@@ -1,0 +1,26 @@
+# Listed by ../catalog-info.yaml.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: product-a-referencedata
+  title: Reference-data loader
+  description: >-
+    .NET worker that loads public reference datasets into the reference schema: one CronJob per
+    dataset, deploy-time seed Jobs, and one consumer for on-demand refreshes from the portal.
+  tags: [dotnet, cronjob]
+  annotations:
+    dev.azure.com/host-org: dev.azure.com/example-org
+    dev.azure.com/project-repo: product-a/product-a
+    dev.azure.com/build-definition: product-a-referencedata-ci
+    backstage.io/source-location: url:https://dev.azure.com/example-org/product-a/_git/product-a?path=/charts/product-a-referencedata
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-a-referencedata
+    argocd/app-selector: example.com/service=product-a-referencedata
+spec:
+  type: service
+  lifecycle: production
+  owner: product-a-team
+  system: product-a
+  dependsOn:
+    - resource:product-a-database
+    - resource:product-a-message-bus
+    - resource:product-a-key-vault

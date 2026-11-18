@@ -1,0 +1,15 @@
+gateway:
+  listeners:
+    websecure:
+      hostname: demo.product-a.example.net
+certificate:
+  dnsNames:
+    - demo.product-a.example.net
+redirect:
+  hostnames:
+    - demo.product-a.example.net
+traefik:
+  service:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-resource-group: rg-product-a-demo-network
+      service.beta.kubernetes.io/azure-pip-name: pip-product-a-demo-edge

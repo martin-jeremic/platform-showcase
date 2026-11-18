@@ -1,0 +1,7 @@
+# Platform descriptor -- its PRESENCE deploys 'elasticsearch' to 'aks-product-a-demo'.
+# Auth ON: the application reads the elastic password from the same vault object.
+chartPath:     elasticsearch
+chartRevision: elasticsearch-1.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   elasticsearch
+namespace:     infrastructure
+syncWave:      "3"

@@ -1,0 +1,93 @@
+{{- $cfg := .Values.config | default dict -}}
+{{- $cfgKeycloak := $cfg.keycloak | default dict -}}
+{{- $cfgRabbitmq := $cfg.rabbitmq | default dict -}}
+{{- $opts := $cfg.options | default dict -}}
+{{- $host := $cfg.host | default "" -}}
+{{- $relPath := (get $opts "KC_HTTP_RELATIVE_PATH") | default "" -}}
+#
+# All non-sensitive Keycloak configuration. Rendered in BOTH auth modes — the
+# only thing azureKeyVault.enabled changes is where the two passwords come from.
+#
+# NOTHING is hardcoded in this template. Every key comes from values, in three
+# layers, last wins:
+#   1. config.options — Keycloak option constants (defaults in values.yaml, so an
+#                       env file can override any of them, or set one to null to
+#                       drop it entirely)
+#   2. derived        — keys computed from config.host / config.keycloak.* /
+#                       config.rabbitmq.*, emitted only when their source is set
+#   3. config.extra   — free-form escape hatch, merged last
+#
+# Secrets are never here. KC_DB_PASSWORD / RABBITMQ_PASSWORD are injected as env
+# vars from the Secret the CSI driver syncs (see secretproviderclass.yaml).
+#
+{{- /* ── layer 2: derived from structured per-env values ─────────────────── */ -}}
+{{- $derived := dict -}}
+{{- if $cfgKeycloak.dbUrl }}{{ $_ := set $derived "KC_DB_URL" $cfgKeycloak.dbUrl }}{{ end -}}
+{{- if $cfgKeycloak.dbUsername }}{{ $_ := set $derived "KC_DB_USERNAME" $cfgKeycloak.dbUsername }}{{ end -}}
+{{- if $host -}}
+  {{- /* KC_HOSTNAME as a FULL URL including the relative path.
+
+         Keycloak 25 replaced the hostname options with `hostname:v2`, and this is
+         where the forked chart is stuck in the old world. Under v2:
+             KC_HOSTNAME            accepts a full URL (this is the v2 way)
+             KC_HOSTNAME_ADMIN_URL  REMOVED -> renamed to KC_HOSTNAME_ADMIN
+             KC_HOSTNAME_FRONTEND_URL  REMOVED, no replacement
+             KC_HOSTNAME_STRICT_HTTPS  REMOVED
+
+         The fork emitted both removed *_URL keys, derived from $host. On 26.7 a
+         removed option is not a deprecation warning, so this chart set Keycloak up
+         to fail at startup on the very options meant to make its URLs correct.
+
+         Passing the full URL here does the same job in one v2-valid option: the
+         issuer, the frontend URL and every OIDC redirect are all derived from it,
+         and it still cannot drift from KC_HTTP_RELATIVE_PATH because it is built
+         from $relPath.
+
+         KC_HOSTNAME_ADMIN is deliberately NOT set: the admin console is served on
+         the same host as everything else here, and v2 defaults it to KC_HOSTNAME.
+         Set it only if the admin console moves to a separate hostname. */ -}}
+  {{- $_ := set $derived "KC_HOSTNAME" (printf "https://%s%s" $host $relPath) -}}
+{{- end -}}
+{{- if $cfgRabbitmq.host }}{{ $_ := set $derived "RABBITMQ_HOST" $cfgRabbitmq.host }}{{ end -}}
+{{- if $cfgRabbitmq.port }}{{ $_ := set $derived "RABBITMQ_PORT" $cfgRabbitmq.port }}{{ end -}}
+{{- if $cfgRabbitmq.user -}}
+  {{- /* RABBITMQ_USERNAME is the name the SPI actually reads
+         (RabbitMQEventListenerProvider.java:52). RABBITMQ_USER is kept for
+         backwards compatibility but is read by nothing — without USERNAME the
+         SPI silently falls back to its "guest" default. Both are emitted from
+         the same source so they cannot disagree. */ -}}
+  {{- $_ := set $derived "RABBITMQ_USERNAME" $cfgRabbitmq.user -}}
+  {{- $_ := set $derived "RABBITMQ_USER"     $cfgRabbitmq.user -}}
+{{- end -}}
+{{- if $cfgRabbitmq.exchangeName }}{{ $_ := set $derived "EXCHANGE_NAME" $cfgRabbitmq.exchangeName }}{{ end -}}
+{{- /* Read by nothing — the SPI declares a FANOUT exchange and has no queue or
+       broker-name concept. Emitted only for parity with the live deployment. */ -}}
+{{- if $cfgRabbitmq.queue }}{{ $_ := set $derived "RABBITMQ_QUEUE" $cfgRabbitmq.queue }}{{ end -}}
+{{- if $cfgRabbitmq.brokerName }}{{ $_ := set $derived "RABBITMQ_BROKER_NAME" $cfgRabbitmq.brokerName }}{{ end -}}
+{{- /* ── merge the three layers ──────────────────────────────────────────── */ -}}
+{{- $data := dict -}}
+{{- $data = mergeOverwrite $data $opts -}}
+{{- $data = mergeOverwrite $data $derived -}}
+{{- /* The action below closes with `}}` and NOT `-}}` on purpose — do not "tidy"
+       it. Every action in this setup block chomps both sides, so the block
+       collapses onto the last line of the header comment above. A trailing `-}}`
+       here would also swallow the newline before `apiVersion:`, rendering
+       `#apiVersion: v1` — a manifest with no apiVersion at all. Helm and
+       `kubectl apply` both accept that silently; ArgoCD fails the whole sync with
+       "failed to discover server resources for group version :
+        groupVersion shouldn't be empty" (empty group + empty version). */ -}}
+{{- $data = mergeOverwrite $data ($cfg.extra | default dict) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keycloak.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "keycloak.labels" . | nindent 4 }}
+data:
+  {{- range $k := (keys $data | sortAlpha) }}
+  {{- $v := get $data $k }}
+  {{- if not (kindIs "invalid" $v) }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  {{- end }}

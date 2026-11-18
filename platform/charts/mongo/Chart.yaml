@@ -1,0 +1,25 @@
+apiVersion: v2
+name: mongo
+description: >-
+  MongoDB document database for the company services. Standalone StatefulSet with
+  persistent storage, the admin credential from Azure Key Vault over CSI, a
+  headless Service for wire-protocol clients, and a scheduled mongodump to Azure
+  Blob Storage that refuses to render half-configured.
+type: application
+version: 0.2.0
+# Image tag of the official `mongo` image; image.tag defaults to it. An EXACT patch:
+# a floating "8.0" moves under a running database on any node re-pull. A MongoDB
+# MAJOR upgrade is a one-way step, not a tag change (setFeatureCompatibilityVersion
+# must be raised on the running instance first).
+#
+# QUOTED: bare 8.0 parses as a YAML float and fails the Chart schema.
+appVersion: "8.0.15"
+keywords:
+  - mongodb
+  - database
+sources:
+  - https://github.com/mongodb/mongo
+# 0.2.0 -- no password Secret rendered from values (existingSecret or Key Vault
+#   only); Key Vault and the backup default to workload identity; the backup
+#   passes the password through a 0600 file instead of mongodump's argv; the
+#   image tag is an exact patch.

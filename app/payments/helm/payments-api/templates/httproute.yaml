@@ -1,0 +1,45 @@
+{{- /*
+group/kind on parentRefs and group/kind/weight on backendRefs are the Gateway API defaults,
+rendered explicitly. Argo CD syncs with server-side apply and diffs parentRefs and rules as ATOMIC
+lists: the API server adds the defaulted fields to the stored object, so a chart that omits them
+differs from the live object forever. The sync succeeds, the Application stays OutOfSync, and a
+real drift hides among the permanent false ones. Declaring what the server stores keeps it Synced.
+*/ -}}
+{{- if and .Values.gateway.enabled .Values.route.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "payments-backend.fullname" . }}
+  labels:
+    {{- include "payments-backend.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      {{- with .Values.gateway.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml (required "route.hostnames is required when route.enabled" .Values.route.hostnames) | nindent 4 }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.path | quote }}
+      {{- if .Values.route.rewrite.enabled }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: {{ .Values.route.rewrite.replacePrefixMatch | quote }}
+      {{- end }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ include "payments-backend.fullname" . }}
+          port: {{ .Values.service.port }}
+          weight: 1
+{{- end }}

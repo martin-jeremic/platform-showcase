@@ -1,0 +1,135 @@
+# =============================================================================
+# postgres-exporter -- BASE values
+# =============================================================================
+# Everything here is cluster-invariant. The two things that name an environment --
+# WHICH server to connect to and WHERE its password lives -- are deliberately left
+# empty and set in the cluster overlay
+# (gitops/platform: platform/values/<cluster>/postgres-exporter.yaml).
+#
+# Sync wave 7. It needs the CSI driver (wave 0) and the ServiceMonitor CRD, which
+# arrives with observability (wave 6). Nothing needs it, so it goes last.
+#
+# THE CREDENTIAL. The exporter holds a read-only monitoring login (PG role
+# `monitoring`, GRANT pg_monitor) -- never the keycloak application user and never
+# the server admin. There is no password key anywhere in this file by design: the
+# only path to it is Key Vault over CSI, exactly as the rabbitmq chart does it.
+# =============================================================================
+
+# One replica, not two. This is a scrape target, not a service: a second replica
+# would connect to the same server and report every series twice.
+replicaCount: 1
+
+image:
+  repository: quay.io/prometheuscommunity/postgres-exporter
+  pullPolicy: IfNotPresent
+  # Empty means Chart.appVersion.
+  tag: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# The connection, minus the password
+# ---------------------------------------------------------------------------
+# postgres_exporter takes the DSN in three pieces. These are the two non-secret
+# ones; DATA_SOURCE_PASS comes from the synced Secret. Both are `required` at
+# render time rather than defaulted, because a wrong-but-plausible default here
+# would connect somewhere unintended.
+datasource:
+  # host:port/database?params -- NO credentials, ever.
+  uri: ""
+  # The monitoring role. NOT the application user, NOT the server admin.
+  user: ""
+
+service:
+  type: ClusterIP
+  port: 9187
+
+metrics:
+  serviceMonitor:
+    # No release label needed: the observability chart sets
+    # serviceMonitorSelectorNilUsesHelmValues false, so Prometheus selects
+    # ServiceMonitors from every namespace.
+    #
+    # FRESH-BOOTSTRAP CAVEAT: the CRD arrives with observability (wave 6). This
+    # component is wave 7, so it is already behind it -- but on a cluster where
+    # observability is not deployed at all, set this false.
+    enabled: true
+    # Empty means Prometheus' own default scrape interval.
+    interval: ""
+
+# Restart the pod when Key Vault rotates the password. The CSI driver updates the
+# synced Secret in place, and the exporter reads its environment once at startup,
+# so without this a rotation silently breaks the scrape at the next PG restart.
+reloader:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# No priorityClassName, deliberately -- CI prints an advisory WARN for it and the
+# WARN is correct. Nothing in the platform depends on this exporter, so under node
+# pressure it SHOULD be evicted before anything that serves traffic. Losing it
+# costs a gap in the PostgreSQL dashboard and nothing else.
+
+# The general-purpose pool. This exporter has no affinity with the monitoring
+# pool -- it is scraped BY the monitoring stack, it is not part of it.
+nodeSelector:
+  pool: infra
+tolerations:
+  - key: workload
+    operator: Equal
+    value: infra
+    effect: NoSchedule
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  # A static Go binary that writes nothing to disk.
+  readOnlyRootFilesystem: true
+
+serviceAccount:
+  # Must be true: the workload-identity annotation that binds this workload to
+  # its user-assigned MI lives on the ServiceAccount.
+  create: true
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Azure Key Vault over the Secrets Store CSI driver
+# ---------------------------------------------------------------------------
+# Same contract as the rabbitmq chart: the vault object name is secretPrefix, two
+# dashes, kvName -- so `password` below reads postgres-exporter--password from the
+# vault and lands in the synced Secret under the key `postgresPassword`.
+#
+# The Azure coordinates (authMode, client IDs, tenant, vault name) belong in the
+# cluster overlay, not here.
+azureKeyVault:
+  enabled: true
+  authMode: workloadIdentity
+  kubeletClientId: ""
+  workloadIdentityClientId: ""
+  tenantId: ""
+  keyvaultName: ""
+  secretPrefix: "postgres-exporter"
+  syncedSecretName: "postgres-exporter-kv-sync"
+  secretProviderClassName: "postgres-exporter-secret-provider"
+  secrets:
+    - kvName: password
+      key: postgresPassword

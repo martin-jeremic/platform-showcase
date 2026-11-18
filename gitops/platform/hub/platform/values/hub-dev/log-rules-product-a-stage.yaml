@@ -1,0 +1,3 @@
+tenant: product-a-stage
+rules:
+  ingestRate: true

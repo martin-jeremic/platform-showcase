@@ -1,0 +1,80 @@
+{{- /*
+Render-time invariants. Renders NO object -- it fails the render when values that
+must agree do not. Under Argo a failed render is a ComparisonError and nothing is
+applied, which beats a DaemonSet that syncs green with a pod stuck in
+ContainerCreating, or an agent that ships nothing.
+
+1. mtls.source is keyVault or existingSecret. (The `inline` source of the chart's
+   push-Helm era rendered a Secret from --set-file values; it is gone: a chart that
+   can render a private key from values eventually has one committed.)
+2. The volume behind the /etc/alloy/tls mount matches the source: a CSI volume
+   naming the SecretProviderClass this chart renders (keyVault, with
+   nodePublishSecretRef present exactly when authMode is servicePrincipal), or a
+   Secret volume naming mtls.existingSecret.
+3. workloadIdentity: the ServiceAccount carries the client-id annotation AND the
+   pod carries the azure.workload.identity/use label -- with only one of the two
+   the webhook projects no token and the mount fails although both look right.
+4. metrics.rabbitmq.enabled needs namespace, podLabelSelector and jobName;
+   metrics.trivy.enabled needs serviceName and namespace.
+*/ -}}
+{{- $src := toString .Values.mtls.source -}}
+{{- if not (has $src (list "keyVault" "existingSecret")) -}}
+{{- fail (printf "mtls.source must be keyVault or existingSecret, got %q. Set it in this cluster's values; values.yaml explains both." $src) -}}
+{{- end -}}
+{{- if .Values.alloy.enabled -}}
+{{- $mountName := "" -}}
+{{- range .Values.alloy.alloy.mounts.extra -}}
+{{- if eq (toString .mountPath) "/etc/alloy/tls" -}}{{- $mountName = .name -}}{{- end -}}
+{{- end -}}
+{{- if not $mountName -}}
+{{- fail "alloy.alloy.mounts.extra has no mount at /etc/alloy/tls: the Alloy config reads client.crt, client.key and ca.crt there" -}}
+{{- end -}}
+{{- $vol := dict -}}
+{{- range .Values.alloy.controller.volumes.extra -}}
+{{- if eq .name $mountName -}}{{- $vol = . -}}{{- end -}}
+{{- end -}}
+{{- if not $vol.name -}}
+{{- fail (printf "alloy.controller.volumes.extra has no volume named %s, the one mounted at /etc/alloy/tls" $mountName) -}}
+{{- end -}}
+{{- if eq $src "existingSecret" -}}
+{{- $sec := dict -}}{{- if kindIs "map" (index $vol "secret") -}}{{- $sec = index $vol "secret" -}}{{- end -}}
+{{- $want := required "mtls.existingSecret is required when mtls.source is existingSecret" .Values.mtls.existingSecret -}}
+{{- if ne (dig "secretName" "" $sec) $want -}}
+{{- fail (printf "mtls.source is existingSecret, but volume %s is not a Secret volume with secretName %s" $mountName $want) -}}
+{{- end -}}
+{{- else -}}
+{{- $csi := dict -}}{{- if kindIs "map" (index $vol "csi") -}}{{- $csi = index $vol "csi" -}}{{- end -}}
+{{- if ne (dig "volumeAttributes" "secretProviderClass" "" $csi) "cluster-monitoring-agent-hub-tls" -}}
+{{- fail (printf "mtls.source is keyVault, but volume %s is not a CSI volume with volumeAttributes.secretProviderClass: cluster-monitoring-agent-hub-tls. Restate alloy.controller.volumes.extra in this cluster's values (lists replace wholesale); values.yaml shows the shape." $mountName) -}}
+{{- end -}}
+{{- $ref := dig "nodePublishSecretRef" "name" "" $csi -}}
+{{- $mode := .Values.mtls.keyVault.authMode -}}
+{{- if eq $mode "servicePrincipal" -}}
+{{- if not $ref -}}
+{{- fail (printf "mtls.keyVault.authMode is servicePrincipal, but volume %s has no csi.nodePublishSecretRef.name (the per-namespace secrets-store-creds Secret)" $mountName) -}}
+{{- end -}}
+{{- else if $ref -}}
+{{- fail (printf "volume %s sets csi.nodePublishSecretRef, but mtls.keyVault.authMode is %q: the driver would use the static credential and ignore the identity. Remove nodePublishSecretRef." $mountName $mode) -}}
+{{- end -}}
+{{- if eq $mode "workloadIdentity" -}}
+{{- if not (dig "annotations" "azure.workload.identity/client-id" "" .Values.alloy.serviceAccount) -}}
+{{- fail "mtls.keyVault.authMode is workloadIdentity, but alloy.serviceAccount.annotations has no azure.workload.identity/client-id" -}}
+{{- end -}}
+{{- if ne (toString (dig "podLabels" "azure.workload.identity/use" "" .Values.alloy.controller)) "true" -}}
+{{- fail "mtls.keyVault.authMode is workloadIdentity, but alloy.controller.podLabels has no azure.workload.identity/use: \"true\" -- the webhook would never project the token" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.metrics.enabled .Values.metrics.rabbitmq.enabled -}}
+{{- range $k := list "namespace" "podLabelSelector" "jobName" -}}
+{{- if not (index $.Values.metrics.rabbitmq $k) -}}
+{{- fail (printf "metrics.rabbitmq.enabled is true but metrics.rabbitmq.%s is empty" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.metrics.enabled .Values.metrics.trivy.enabled -}}
+{{- if not (and .Values.metrics.trivy.serviceName .Values.metrics.trivy.namespace) -}}
+{{- fail "metrics.trivy.enabled is true but metrics.trivy.serviceName / namespace is empty: the trivy release's Service and namespace" -}}
+{{- end -}}
+{{- end -}}

@@ -1,0 +1,89 @@
+# =============================================================================
+# rbac -- Entra ID groups -> Kubernetes RBAC
+# =============================================================================
+# Config-only chart: no workload, no image, no Service. Sync wave 3. It renders
+# the application Namespaces plus the RoleBindings that let people work inside
+# them.
+#
+# Subjects are Entra group OBJECT IDs -- never usernames, never display names. The
+# AKS API server receives group GUIDs in the token and nothing else, so a binding
+# written against a display name grants nothing and reports no error. Object IDs
+# are identifiers, not secrets; they are safe to commit.
+#
+# THE ADMIN TIER IS DELIBERATELY ABSENT. AKS binds the admin group to cluster-admin
+# itself through admin_group_object_ids on the cluster resource -- there is no
+# manifest for it, and nothing here should duplicate the most dangerous binding on
+# the cluster.
+#
+# Membership (which person is in which group) is NOT here and NOT in the IaC. It is
+# one command per person:
+#   az ad group member add --group grp-k8s-<cluster>-<namespace> --member-id <user object id>
+#
+# THIS CHART WILL NOT RENDER until every entraGroupId is a real GUID. That is the
+# intended behaviour: Kubernetes accepts any string as a Group subject and never
+# verifies that it resolves, so a typo'd or empty object ID produces a RoleBinding
+# that silently grants nothing, and the failure surfaces days later as a developer
+# saying "Forbidden". A red Application is the cheaper failure.
+# =============================================================================
+
+# -- App namespaces -----------------------------------------------------------
+# One Namespace + one RoleBinding per entry.
+#
+#   name           namespace to create and grant access in (DNS-1123 label)
+#   create         render the Namespace object itself (false = it already exists)
+#   entraGroupId   Entra group object ID (GUID) -- the RoleBinding subject
+#   entraGroupName display name, recorded as an annotation so the cluster stays
+#                  legible when all a binding shows you is a GUID
+#   role           built-in ClusterRole to bind: view | edit | admin
+#
+# `edit` is the working tier: deploy, delete, scale, exec, read/write Secrets -- but
+# NOT create RoleBindings, so this chart stays the only source of access.
+#
+# The namespace must equal the application appset's destination namespace for the
+# cluster, or the apps land in a namespace nobody has access to.
+namespaces:
+  - name: product-a
+    create: true
+    entraGroupId: ""
+    entraGroupName: grp-k8s-product-a-prod-edit
+    role: edit
+
+# -- Namespace deletion guard -------------------------------------------------
+# The Application syncs with prune: true, so removing an entry above would delete
+# the Namespace AND everything running in it. With this on, Namespaces carry
+# argocd.argoproj.io/sync-options: Prune=false, so a removed entry leaves an
+# orphaned but intact namespace to be deleted by hand, deliberately.
+#
+# RoleBindings are always prunable: removing an entry MUST actually revoke access.
+protectNamespaces: true
+
+# -- Namespace lister ---------------------------------------------------------
+# `kubectl get ns`, k9s and Lens all list namespaces before they can scope to one.
+# Built-in `edit` is namespaced and grants nothing cluster-wide, so without this a
+# developer with perfectly good access sees "Forbidden" the moment a tool starts.
+#
+# Subjects are EVERY group in namespaces[] above -- no separate "devs" group to
+# maintain or forget. Read-only, and the weakest cluster-wide grant that works.
+namespaceLister:
+  enabled: true
+  name: namespace-lister
+  # Node get/list too: kubectl describe node, scheduling diagnostics and most GUI
+  # dashboards need it. Node objects expose labels, taints and capacity -- not
+  # workloads. "Why is my pod Pending" is answered by node labels and taints, and
+  # the platform pins components to specific pools.
+  includeNodes: true
+
+# -- Cluster-wide tiers -------------------------------------------------------
+# Optional, beyond the per-namespace grants. Read-only across the whole cluster,
+# which is what makes platform components debuggable by developers who have no
+# access to the platform namespaces themselves.
+#
+# cluster-admin is NOT grantable here -- clusterBindings[].clusterRole is validated
+# against view|edit|admin. That tier belongs to AKS via admin_group_object_ids.
+clusterBindings:
+  - name: platform-readers-view
+    clusterRole: view
+    entraGroupId: ""
+    entraGroupName: grp-k8s-product-a-prod-readers
+
+commonLabels: {}

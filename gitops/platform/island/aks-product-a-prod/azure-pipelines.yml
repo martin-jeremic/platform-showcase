@@ -1,0 +1,87 @@
+# CI for the island gitops repo (product-a-platform-gitops). Checks only what Argo CD
+# cannot, on content that is opaque to it; no cluster access, no Azure credential.
+#
+#   * descriptors   -- a missing field fails generation for EVERY component at once
+#                      (missingkey=error); a missing values file fails that render
+#   * every descriptor rendered at its pinned tag with its values
+#   * dashboard JSON -- opaque to Argo; unresolved datasource placeholders apply
+#                      cleanly and render "Datasource not found" on every panel
+#   * thresholds    -- a dashboard that draws an alert's threshold must draw the
+#                      number the PINNED chart's rule fires on
+#   * kustomize     -- the root app and the dashboards both build; nothing from
+#                      argocd/setup/ is rendered by the root app
+trigger:
+  branches:
+    include:
+      - main
+
+resources:
+  repositories:
+    # Read-only: the charts, with tags (descriptors pin tags), and their tools/.
+    - repository: charts
+      type: git
+      name: platform/org-platform
+      ref: refs/heads/main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  helmVersion: 'v3.17.2'
+  GITOPS_DIR: $(Build.SourcesDirectory)/product-a-platform-gitops
+  CHARTS_DIR: $(Build.SourcesDirectory)/org-platform
+
+steps:
+  - checkout: self
+  - checkout: charts
+    fetchDepth: 0
+    fetchTags: true
+
+  - task: HelmInstaller@1
+    inputs:
+      helmVersionToInstall: $(helmVersion)
+
+  - script: sh platform/component.sh validate
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Descriptors and values files present and consistent'
+
+  - script: bash platform/render-descriptors.sh "$CHARTS_DIR"
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Render every descriptor at its pinned tag'
+
+  - script: python3 "$CHARTS_DIR/tools/validate-dashboards.py" dashboards/aks-product-a-prod
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Dashboard JSON valid'
+
+  # The threshold is compared against the rule AT THE TAG the log-rules descriptor
+  # pins -- what the cluster actually runs -- so a dashboard cannot land ahead of
+  # the chart version that ships its rule. The charts pipeline runs the same script
+  # from its side.
+  - script: |
+      set -euo pipefail
+      DASH=dashboards/aks-product-a-prod/product/ingest-rate.json
+      RULE=observability-log-rules/log-rules/ingest-rate.yaml
+      tag=$(awk '/^chartRevision:/{print $2; exit}' platform/aks-product-a-prod/log-rules-aks-product-a-prod.yaml)
+      git -C "$CHARTS_DIR" show "$tag:$RULE" > "$AGENT_TEMPDIRECTORY/rule.yaml" \
+        || { echo "FAIL: the pinned chart ($tag) has no $RULE -- land that chart version first"; exit 1; }
+      python3 "$CHARTS_DIR/tools/check-dashboard-threshold.py" "$AGENT_TEMPDIRECTORY/rule.yaml" "$DASH"
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Dashboard thresholds match the pinned chart''s log rules'
+
+  - script: |
+      set -euo pipefail
+      kubectl kustomize argocd/ > "$AGENT_TEMPDIRECTORY/root.yaml"
+      grep -q '^kind: AppProject$'     "$AGENT_TEMPDIRECTORY/root.yaml"
+      grep -q '^kind: ApplicationSet$' "$AGENT_TEMPDIRECTORY/root.yaml"
+      if grep -nE '^kind: Secret$|secret-type: repo-creds|cloudflare|oidc\.keycloak\.clientSecret|grafana-admin' "$AGENT_TEMPDIRECTORY/root.yaml"; then
+        echo "FAIL: a file from argocd/setup/ is rendered by the root app -- see argocd/setup/README.md"
+        exit 1
+      fi
+      kubectl kustomize dashboards/aks-product-a-prod > "$AGENT_TEMPDIRECTORY/dash.yaml"
+      grep -q 'grafana_dashboard: "1"' "$AGENT_TEMPDIRECTORY/dash.yaml" \
+        || { echo "FAIL: dashboard ConfigMaps lack the discovery label"; exit 1; }
+      grep -q 'grafana_folder:' "$AGENT_TEMPDIRECTORY/dash.yaml" \
+        || { echo "FAIL: dashboard ConfigMaps lack grafana_folder annotations"; exit 1; }
+      echo "root app OK, setup/ excluded; dashboards render $(grep -c '^kind: ConfigMap' "$AGENT_TEMPDIRECTORY/dash.yaml") ConfigMaps"
+    workingDirectory: $(GITOPS_DIR)
+    displayName: 'Kustomize builds and invariants hold'

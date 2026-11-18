@@ -1,0 +1,31 @@
+# CI values: cert-manager needs no cluster fact beyond the defaults; this file
+# switches the staging issuer on so both list entries are exercised.
+clusterIssuers:
+  - name: letsencrypt-prod
+    enabled: true
+    spec:
+      acme:
+        server: https://acme-v02.api.letsencrypt.org/directory
+        email: platform-team@example.com
+        privateKeySecretRef:
+          name: letsencrypt-prod-private-key
+        solvers:
+          - dns01:
+              cloudflare:
+                apiTokenSecretRef:
+                  name: cloudflare-api-token
+                  key: api-token
+  - name: letsencrypt-staging
+    enabled: true
+    spec:
+      acme:
+        server: https://acme-staging-v02.api.letsencrypt.org/directory
+        email: platform-team@example.com
+        privateKeySecretRef:
+          name: letsencrypt-staging-private-key
+        solvers:
+          - dns01:
+              cloudflare:
+                apiTokenSecretRef:
+                  name: cloudflare-api-token
+                  key: api-token

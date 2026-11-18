@@ -1,0 +1,19 @@
+# Dev values (push-based). The CD pipeline's migration stage adds image.repository, image.digest
+# (the SAME digest the API deploy rolls), migrationJob.enabled and migrationJob.runNonce (the
+# build id, so every run is a new Job). Stage, demo and prod live in gitops/apps.
+imagePullSecrets:
+  - name: productacr-pull
+
+workloadIdentity:
+  enabled: true
+  clientId: "88888888-8888-8888-8888-888888888888"
+
+azureKeyVault:
+  enabled: true
+  keyvaultName: kv-product-a-dev
+  tenantId: "11111111-1111-1111-1111-111111111111"
+
+migrationJob:
+  mode: migrate
+  # Dev's tenant count is the largest of all environments (every test tenant lives there).
+  activeDeadlineSeconds: 1200

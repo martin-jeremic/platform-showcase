@@ -1,0 +1,192 @@
+{{- $fullname := include "product-a-api.fullname" . -}}
+{{- $secret := .Values.azureKeyVault.syncedSecretName -}}
+{{- $cm := printf "%s-config" $fullname -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "product-a-api.labels" . | nindent 4 }}
+  {{- if .Values.azureKeyVault.enabled }}
+  annotations:
+    {{- /* The Key Vault-synced Secret is the one input Helm cannot hash: its content arrives from
+         the vault at mount time, never through the chart. So Reloader handles that Secret, and only
+         that one. Its stamp on the pod template is drift to Argo CD; the platform's Argo config lists
+         the stamp under ignoreDifferences with RespectIgnoreDifferences=true, so a sync keeps it.
+         Without that, the stamp races Argo's next sync and the rollout is silently reverted. */}}
+    secret.reloader.stakater.com/reload: {{ $secret | quote }}
+  {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "product-a-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- /* Config change => new pod template hash => rolling update, applied by Argo's own sync. */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "product-a-api.labels" . | nindent 8 }}
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "product-a-api.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "product-a-api.selectorLabels" . | nindent 14 }}
+          {{- /* Count only pods of the same ReplicaSet: during a rollout the old pods would
+               otherwise skew the placement of the new ones. */}}
+          matchLabelKeys:
+            - pod-template-hash
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "product-a-api.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            # --- non-sensitive groups (ConfigMap), one explicit entry per key ---------------
+            - name: API
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: API}}
+            - name: IDENTITY
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: IDENTITY}}
+            - name: BROKER
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: BROKER}}
+            - name: MODULE
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: MODULE}}
+            {{- if .Values.config.blobStorage.enabled }}
+            - name: BLOBSTORAGE
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: BLOBSTORAGE}}
+            {{- end }}
+            - name: Logging__LogLevel__Default
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: Logging__LogLevel__Default}}
+            - name: ALLOW_ADMIN_OPERATIONS
+              valueFrom: {configMapKeyRef: {name: {{ $cm }}, key: ALLOW_ADMIN_OPERATIONS}}
+            # --- secrets (Key Vault -> synced Secret) ---------------------------------------
+            # DATABASE is a whole group ({"PostgresConnection": ...}). The other secrets are single
+            # Section__Key variables: .NET configuration merges Identity__ClientSecret into the
+            # IDENTITY group above, so the non-secret half lives in the ConfigMap and the secret
+            # half in the vault, and neither has to carry the other.
+            - name: DATABASE
+              valueFrom: {secretKeyRef: {name: {{ $secret }}, key: Database}}
+            - name: Identity__ClientSecret
+              valueFrom: {secretKeyRef: {name: {{ $secret }}, key: IdentityClientSecret}}
+            - name: Broker__Password
+              valueFrom: {secretKeyRef: {name: {{ $secret }}, key: BrokerPassword}}
+            {{- if .Values.config.blobStorage.enabled }}
+            - name: BlobStorage__ConnectionString
+              valueFrom: {secretKeyRef: {name: {{ $secret }}, key: BlobConnection}}
+            {{- end }}
+            {{- if .Values.otel.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ required "otel.endpoint is required when otel.enabled" .Values.otel.endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ $fullname | quote }}
+            {{- end }}
+          {{- with .Values.startupProbe }}
+          {{- if .enabled }}
+          startupProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            periodSeconds: {{ .periodSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          {{- if .enabled }}
+          readinessProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: 5
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: 5
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          lifecycle:
+            preStop:
+              {{- /* The native sleep action, not `exec: [sleep, N]`: the chiseled image has no
+                   sleep binary (no shell, no coreutils). The pause lets every node's kube-proxy and
+                   the gateway drop this endpoint before SIGTERM stops the listener. */}}
+              sleep:
+                seconds: {{ .Values.preStopSleepSeconds }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- /* The only writable path under readOnlyRootFilesystem: request buffering over
+                 64 KB and the .NET diagnostics socket both land here. */}}
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.azureKeyVault.enabled }}
+            {{- /* Not read as files: the mount is what makes the driver sync the Secret above.
+                 The driver keeps the synced Secret only while a pod mounts the class. */}}
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- if .Values.azureKeyVault.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.azureKeyVault.secretProviderClassName | quote }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

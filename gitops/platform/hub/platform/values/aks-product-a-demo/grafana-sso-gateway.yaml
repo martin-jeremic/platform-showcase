@@ -1,0 +1,7 @@
+domain: demo.product-a.example.net
+oidc:
+  keycloak:
+    baseUrl: https://demo.product-a.example.net/keycloak
+    realm: product-a-demo
+  grafana:
+    rootUrl: https://demo.product-a.example.net/monitoring/grafana

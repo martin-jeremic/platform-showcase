@@ -1,0 +1,40 @@
+# PostgreSQL alerts via the postgres-exporter chart (job = its Service name).
+#
+# DELIBERATELY DORMANT until the exporter's gitops descriptor lands on a cluster.
+# `pg_up == 0` matches nothing while the series does not exist, so shipping these
+# early is free, and they arm themselves the moment the exporter is deployed.
+#
+# DO NOT "improve" this to absent(pg_up) -- that fires TODAY, forever, against a
+# component that is intentionally not deployed (exactly the permanently-red-alert
+# failure the disabled control-plane monitors were removed for). Add a
+# "was there, now gone" rule (rules/keycloak.yaml shape) only in the same commit
+# that adds the exporter's descriptor.
+groups:
+  - name: platform.postgres
+    rules:
+      - alert: PlatformPostgresDown
+        expr: pg_up{job="postgres-exporter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL unreachable from {{ $labels.cluster }}"
+          description: >-
+            postgres_exporter cannot reach its server for 5m. Keycloak (its only
+            consumer) will fail logins as its pooled connections recycle.
+
+      - alert: PlatformPostgresTooManyConnections
+        expr: |
+          sum by (cluster) (pg_stat_activity_count{job="postgres-exporter"})
+            /
+          max by (cluster) (pg_settings_max_connections{job="postgres-exporter"})
+            > 0.80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connections >80% of max"
+          description: >-
+            {{ $value | humanizePercentage }} of max_connections in use for 15m on
+            {{ $labels.cluster }}. Keycloak's pool or a connection leak is
+            exhausting the server.

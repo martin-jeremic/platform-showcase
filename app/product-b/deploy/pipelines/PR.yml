@@ -1,0 +1,44 @@
+# product-b pull-request gate. Register as `product-b-pr`; run by a build-validation branch policy
+# on develop (the YAML `pr:` block is ignored for Azure Repos).
+#
+# Hermetic checks only: locked restore (the lock files exist for exactly this), build with warnings
+# as errors, the domain and application suites, and every chart. The architecture and integration
+# suites are NOT here: one is ~8 minutes and ~6 GB of memory per run on a shared build machine, the
+# other needs PostgreSQL. Both moved to nightly.yml, which gates nothing. Placeholders in dev values
+# are not refused here either, only at deploy time, so PRs stay green while facts are gathered.
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  - template: stages/convention-checks-stage.yml@templates
+
+  - template: stages/pr-dotnet-stage.yml@templates
+    parameters:
+      dependsOn: []
+      solution: ProductB.sln
+      suites:
+        - tests/ProductB.Domain.Tests/ProductB.Domain.Tests.csproj
+        - tests/ProductB.Application.Tests/ProductB.Application.Tests.csproj
+      efGuards:
+        - project: src/2-platform/ProductB.Persistence/ProductB.Persistence.csproj
+          startupProject: src/2-platform/ProductB.Migrator/ProductB.Migrator.csproj
+          context: PlatformDbContext
+      dockerfile: src/2-platform/ProductB.Api/Dockerfile
+
+  - template: stages/pr-helm-stage.yml@templates
+    parameters:
+      dependsOn: []
+      charts:
+        - deploy/charts/product-b-api
+        - deploy/charts/product-b-mcp
+        - deploy/charts/product-b-worker
+        - deploy/charts/product-b-agents
+        - deploy/charts/product-b-web
+        - deploy/charts/product-b-db

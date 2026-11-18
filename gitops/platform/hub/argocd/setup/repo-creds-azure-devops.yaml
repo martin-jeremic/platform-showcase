@@ -1,0 +1,35 @@
+# Credential TEMPLATE for every Azure DevOps git repo of the organisation: Entra
+# workload identity, no stored credential, nothing that expires.
+#
+# Argo CD applies a repo-creds template to a repository whose URL starts with `url`
+# below AND whose own repository secret carries no credential. So:
+#   - a repository secret that still holds a PAT keeps using the PAT;
+#   - a repository secret reduced to `type` + `url` inherits workload identity here.
+# Repositories were migrated one at a time by stripping their secret.
+#
+# How the token is obtained: the repo-server's projected service-account token
+# (issuer https://dev.example.com/k8s-issuer, published by chart oidc-issuer -- the
+# hub is on-prem MicroK8s, so it has no managed issuer) is exchanged with Entra for
+# the managed identity in infra/ that is a Reader in the ADO projects. The
+# repo-server's ServiceAccount (argocd-hub-repo-server) carries the client id; see
+# platform/values/hub-dev/argocd.yaml. forceHttpBasicAuth is not needed: the token
+# is sent as a bearer header up front (with a PAT it IS needed, because ADO answers
+# 302 instead of 401 and Argo otherwise never sends the PAT).
+#
+# ONE-TIME, UNMANAGED -- not in ../kustomization.yaml. Contains no secret, so it is
+# safe to commit as-is. Apply with REPLACE, not apply:
+#   kubectl -n argocd-hub replace -f repo-creds-azure-devops.yaml
+# `kubectl apply` would leave the old PAT of the live secret in its data and in the
+# last-applied-configuration annotation; `replace` writes exactly this file.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-creds-azure-devops
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: repo-creds
+type: Opaque
+stringData:
+  type: git
+  url: https://dev.azure.com/example-org/
+  useAzureWorkloadIdentity: "true"

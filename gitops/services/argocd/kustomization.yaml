@@ -1,0 +1,13 @@
+# Rendered by the root app-of-apps. ONLY the resources listed here are Argo-managed; everything
+# else under argocd/ (root-application.yaml, setup/) is excluded so it is never reconciled or
+# pruned: a prune must never be able to delete the credential Argo needs to read this repository.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # One AppProject per business namespace (sync-wave -1, applied before the appset).
+  - projects/hr.yaml
+  - projects/payments.yaml
+  - projects/access.yaml
+  - projects/i18n.yaml
+  - projects/ordering.yaml
+  - appsets/services.yaml

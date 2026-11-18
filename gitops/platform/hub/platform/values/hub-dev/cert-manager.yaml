@@ -1,0 +1,14 @@
+# Single-node cluster: the hard topology spread (DoNotSchedule) would leave every
+# second replica Pending, so this cluster runs one replica of each and no PDB.
+cert-manager:
+  replicaCount: 1
+  podDisruptionBudget:
+    enabled: false
+  webhook:
+    replicaCount: 1
+    podDisruptionBudget:
+      enabled: false
+  cainjector:
+    replicaCount: 1
+    podDisruptionBudget:
+      enabled: false

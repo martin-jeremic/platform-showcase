@@ -1,0 +1,5 @@
+# Managed by CD (gitops-promote-steps.yml), from apps/payments-admin-web/dev/image.yaml (exact dev digest).
+# Do not edit by hand. The digest overrides the tag.
+image:
+  tag: "0.9.0"
+  digest: "sha256:77978b3dd21478aafaecd5b4cc58ae9a31e6b37127d55e6fc9260dcdb145c14f"

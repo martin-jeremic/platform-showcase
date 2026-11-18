@@ -1,0 +1,141 @@
+# Platform ApplicationSet for product-a-stage (a spoke registered with the hub).
+#
+# A component deploys here IFF platform/product-a-stage/<component>.yaml exists (git files
+# generator). Each generated Application is MULTI-SOURCE:
+#   chart  -> the charts repo at the descriptor's chartRevision -- a per-chart TAG,
+#             never `main`. A floating branch meant no way to pin or roll back, and
+#             a push to main reached every auto-syncing cluster at once.
+#   values -> the chart's values.yaml, then platform/values/product-a-stage/<component>.yaml
+#             from THIS repo at main.
+# ignoreMissingValueFiles is NOT set: a missing or misnamed values file must fail
+# the render, not deploy chart defaults while reporting Synced (how a reloader once
+# ran installed-but-inert for months, and how a half-finished values rename
+# silently reverted a gateway's hostname).
+#
+# WHY VALUES LIVE HERE (the values migration). They used to sit beside the charts
+# as values-<cluster>.yaml, with this repo's values as an opt-in `gitopsValues: true`
+# fourth file. That made every hostname or replica count a chart edit, and a stale
+# values-prod.yaml written for a retired cluster was matched by NAME onto every new
+# component. Migrated per component, add-before-delete, each step gated on an
+# empty render diff; then the opt-in collapsed into this base template.
+#
+# PATH SHAPE: platform/VALUES/<cluster>/, never platform/<cluster>/values/. The
+# generator globs platform/product-a-stage/*.yaml; a values file under that prefix would be
+# parsed as a descriptor, hit missingkey=error on the absent chartRevision, and
+# fail generation for EVERY component at once.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-product-a-stage
+  namespace: argocd-hub
+spec:
+  goTemplate: true
+  # Fail generation loudly if a descriptor lacks a field the template reads
+  # (chartPath, chartRevision, releaseName, namespace, syncWave), instead of
+  # rendering an Application with an empty string in it.
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+  generators:
+    - git:
+        repoURL: https://dev.azure.com/example-org/platform/_git/org-platform-gitops
+        revision: main
+        files:
+          - path: "platform/product-a-stage/*.yaml"
+  template:
+    metadata:
+      name: "product-a-stage-{{.path.filename | trimSuffix `.yaml`}}"
+      namespace: argocd-hub
+      annotations:
+        argocd.argoproj.io/sync-wave: "{{.syncWave}}"
+        # A COMPARE-option, so it must be an annotation: Argo ignores unknown
+        # syncOptions SILENTLY, so listing it there is a no-op that looks like it
+        # worked. Diffs against the API server's dry-run of the apply, so CRD schema
+        # defaults (backendRefs[].weight: 1) and controller-written fields
+        # (cert-manager's caBundle injection) stop counting as drift.
+        argocd.argoproj.io/compare-options: ServerSideDiff=true
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+      labels:
+        app.kubernetes.io/part-of: platform
+        example.com/component: "{{.path.filename | trimSuffix `.yaml`}}"
+        example.com/cluster: product-a-stage
+    spec:
+      project: platform-product-a-stage
+      sources:
+        - repoURL: https://dev.azure.com/example-org/platform/_git/org-platform
+          targetRevision: "{{.chartRevision}}"
+          path: "{{.chartPath}}"
+          helm:
+            releaseName: "{{.releaseName}}"
+            valueFiles:
+              - values.yaml
+              - $values/platform/values/product-a-stage/{{.path.filename}}
+            ignoreMissingValueFiles: false
+        # Values-only source: no path, renders nothing, resolves $values.
+        - repoURL: https://dev.azure.com/example-org/platform/_git/org-platform-gitops
+          targetRevision: main
+          ref: values
+      destination:
+        name: product-a-stage
+        namespace: "{{.namespace}}"
+      ignoreDifferences:
+        # Reloader stamps this on every workload it rolls (reloadStrategy:
+        # annotations). It is not in git; without these entries selfHeal reverts
+        # it and restarts the workload a second time, forever OutOfSync.
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: apps
+          kind: DaemonSet
+          jsonPointers:
+            - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+        - group: batch
+          kind: CronJob
+          jsonPointers:
+            - /spec/jobTemplate/spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          # How Argo WRITES -- and what makes adopt-in-place work: it takes field
+          # ownership of objects Helm created instead of failing on them, and it
+          # carries the large CRDs.
+          - ServerSideApply=true
+          # LOAD-BEARING: keeps ignoreDifferences honoured under server-side diff.
+          # Without it Argo strips the fields above on every sync.
+          - RespectIgnoreDifferences=true
+  # Per-descriptor opt-ins, rendered into ONE patch. A templatePatch is a STRING,
+  # so an {{if}} is legal here -- a raw conditional in the template above would
+  # make this file invalid YAML for the root app's kustomize render. goTemplate
+  # short-circuits `and`, so missingkey=error is safe: a flag is read only when
+  # the descriptor has it (hasKey).
+  #
+  #   selfManaged: true  -> no automated sync (the controller's own chart)
+  #   prune: false       -> automated sync without prune
+  # (`gitopsValues`, the pre-migration opt-in to this repo's values, is gone: every
+  # Application is multi-source in the base template.)
+  #
+  # The patch names only syncPolicy. Naming `sources` would REPLACE the whole list
+  # and drop the $values source.
+  templatePatch: |
+    {{- $selfManaged := and (hasKey . "selfManaged") .selfManaged }}
+    {{- $noPrune := and (hasKey . "prune") (not .prune) }}
+    {{- if $selfManaged }}
+    spec:
+      syncPolicy:
+        automated: null
+    {{- else if $noPrune }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
+    {{- end }}

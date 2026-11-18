@@ -1,0 +1,31 @@
+# product-b-mcp: the MCP tool host the agent layer calls. It exposes the domain's own operations
+# as tools; it authenticates nobody and trusts the network boundary, which therefore is enforced
+# by templates/networkpolicy.yaml.
+
+fullnameOverride: ""
+replicaCount: 1
+
+image:
+  repository: productacr.azurecr.io/product-b-mcp
+  digest: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 8080
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 192Mi
+  limits:
+    memory: 384Mi
+
+secretName: product-b-mcp-secrets
+
+networkPolicy:
+  # The source chart shipped this OFF until the dev cluster's CNI enforced NetworkPolicy. On a CNI
+  # that ignores policies the object renders, applies and protects nothing: check before relying.
+  enabled: true
+  # app.kubernetes.io/name of the only pods allowed in.
+  agentsName: product-b-agents

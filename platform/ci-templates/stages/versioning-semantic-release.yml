@@ -1,0 +1,128 @@
+# stages/versioning-semantic-release.yml
+#
+# Versioning stage for repositories that version with semantic-release (the Node/Angular apps).
+# Same OUTPUT CONTRACT as versioning-gitversion.yml:
+#   Versioning.SemanticVersioning.DetermineVersion.{nextVersion,isReleaseReady}
+#
+# The difference that matters downstream: semantic-release only HAS a next version when a
+# releasable commit (feat:, fix:, perf:, a breaking change) arrived. On a chore:/docs:/ci: commit
+# it sets isReleaseReady=false and leaves nextVersion EMPTY. Every stage that publishes anything
+# must therefore be gated on isReleaseReady (build-stage.yml does that by default). Without the
+# gate a non-release used to publish a real image and a real OCI chart under a placeholder
+# version, and the CD promotion then wrote that placeholder into a production descriptor.
+#
+# How the version is found: a --dry-run first (no tag, no commit, no notes), parsing the line
+#   "The next release version is X.Y.Z"
+# Only when that line exists and the branch is the release branch does a second, real run tag
+# the release. The tool and plugin versions are pinned; an unpinned `npx semantic-release` once
+# picked up a new major with a changed config schema in the middle of a release.
+
+parameters:
+  - name: releaseBranch
+    type: string
+    default: refs/heads/main
+  - name: nodeVersion
+    type: string
+    default: '20.x'
+  - name: semanticReleaseVersion
+    type: string
+    default: '24.2.3'
+  # Plugins the repository's .releaserc uses beyond the ones bundled with semantic-release
+  # (commit-analyzer, release-notes-generator). Pinned, one npm spec per entry.
+  - name: extraPlugins
+    type: object
+    default:
+      - '@semantic-release/changelog@6.0.3'
+      - '@semantic-release/git@10.0.1'
+  - name: workingDirectory
+    type: string
+    default: $(Build.SourcesDirectory)
+  - name: dependsOn
+    type: object
+    default: []
+  - name: pool
+    type: object
+    default:
+      name: Default
+
+stages:
+  - stage: Versioning
+    displayName: Determine version
+    dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - job: SemanticVersioning
+        displayName: semantic-release (dry run)
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            fetchTags: true
+
+          - task: UseNode@1
+            displayName: Node ${{ parameters.nodeVersion }}
+            inputs:
+              version: ${{ parameters.nodeVersion }}
+
+          - bash: |
+              set -euo pipefail
+              LOG="$AGENT_TEMPDIRECTORY/semantic-release-dry-run.log"
+              PKGS=(-p "semantic-release@$SR_VERSION")
+              for p in $EXTRA_PLUGINS; do PKGS+=(-p "$p"); done
+
+              npx --yes "${PKGS[@]}" semantic-release --dry-run 2>&1 | tee "$LOG"
+
+              # awk, not grep: no match is the NORMAL case for a chore: commit, and grep's exit 1
+              # under pipefail would turn "nothing to release" into a failed build.
+              NEXT="$(awk '/The next release version is/ { print $NF }' "$LOG" | tail -n 1)"
+              if [ -n "$NEXT" ] && [ "$CURRENT_BRANCH" = "$RELEASE_BRANCH" ]; then
+                echo "Next release: $NEXT"
+                echo "##vso[task.setvariable variable=isReleaseReady;isOutput=true]true"
+                echo "##vso[task.setvariable variable=nextVersion;isOutput=true]$NEXT"
+              else
+                echo "No releasable commit on $CURRENT_BRANCH: nothing will be published by this run."
+                echo "##vso[task.setvariable variable=isReleaseReady;isOutput=true]false"
+                echo "##vso[task.setvariable variable=nextVersion;isOutput=true]"
+              fi
+            name: DetermineVersion
+            displayName: Determine next version (dry run)
+            workingDirectory: ${{ parameters.workingDirectory }}
+            env:
+              SR_VERSION: ${{ parameters.semanticReleaseVersion }}
+              EXTRA_PLUGINS: ${{ join(' ', parameters.extraPlugins) }}
+              CURRENT_BRANCH: $(Build.SourceBranch)
+              RELEASE_BRANCH: ${{ parameters.releaseBranch }}
+              # semantic-release verifies push access even in a dry run.
+              GIT_CREDENTIALS: build:$(System.AccessToken)
+
+          - bash: |
+              set -euo pipefail
+              PKGS=(-p "semantic-release@$SR_VERSION")
+              for p in $EXTRA_PLUGINS; do PKGS+=(-p "$p"); done
+              npx --yes "${PKGS[@]}" semantic-release
+            displayName: Release $(DetermineVersion.nextVersion) (tag + notes)
+            condition: and(succeeded(), eq(variables['DetermineVersion.isReleaseReady'], 'true'))
+            workingDirectory: ${{ parameters.workingDirectory }}
+            env:
+              SR_VERSION: ${{ parameters.semanticReleaseVersion }}
+              EXTRA_PLUGINS: ${{ join(' ', parameters.extraPlugins) }}
+              GIT_CREDENTIALS: build:$(System.AccessToken)
+              GIT_AUTHOR_NAME: ci-bot
+              GIT_AUTHOR_EMAIL: ci-bot@example.com
+              GIT_COMMITTER_NAME: ci-bot
+              GIT_COMMITTER_EMAIL: ci-bot@example.com
+
+      - job: SetBuildNumber
+        displayName: Name the run after the version
+        dependsOn: SemanticVersioning
+        pool: ${{ parameters.pool }}
+        variables:
+          newVersion: $[ dependencies.SemanticVersioning.outputs['DetermineVersion.nextVersion'] ]
+        steps:
+          - checkout: none
+          # A non-release keeps the default run name; '##vso[build.updatebuildnumber]' with an
+          # empty value would fail the job.
+          - bash: echo "##vso[build.updatebuildnumber]$NEW_VERSION"
+            displayName: Update build number
+            condition: and(succeeded(), ne(variables['newVersion'], ''))
+            env:
+              NEW_VERSION: $(newVersion)

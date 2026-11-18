@@ -1,0 +1,16 @@
+# Lint/template values. The digest is sha256("ci"), not a real image.
+image:
+  digest: sha256:1b158839f8aa339e89bb50b1603e90ec68e0fd5565fe10a7cb32729fddf7070a
+configMap:
+  basePath: /tms/
+  envJs: |
+    window.__env = {
+      apiBaseUrl: "https://dev.example.com/tms/api",
+      oidcIssuer: "https://dev.example.com/keycloak/realms/product-b-dev",
+      oidcClientId: "product-b-web",
+      oidcTenantClaimName: "tenant"
+    };
+route:
+  enabled: true
+  hostnames:
+    - dev.example.com

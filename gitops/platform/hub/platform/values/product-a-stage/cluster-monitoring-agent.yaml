@@ -1,0 +1,33 @@
+global:
+  cluster: product-a-stage
+hub:
+  otlp:
+    # Same LAN as the hub: its node IP and the OTLP NodePort, a SAN on the
+    # gateway's server cert.
+    endpoint: 10.0.0.10:31317
+mtls:
+  source: keyVault
+  keyVault:
+    keyvaultName: kv-product-a-stage
+    tenantId: "11111111-1111-1111-1111-111111111111"
+    authMode: servicePrincipal
+metrics:
+  rabbitmq:
+    enabled: true
+    namespace: rabbitmq
+    podLabelSelector: "app.kubernetes.io/name=rabbitmq"
+    jobName: rabbitmq
+alloy:
+  controller:
+    # FULL restatement (lists replace wholesale): the CSI volume replaces the
+    # base Secret volume.
+    volumes:
+      extra:
+        - name: hub-tls
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: cluster-monitoring-agent-hub-tls
+            nodePublishSecretRef:
+              name: secrets-store-creds

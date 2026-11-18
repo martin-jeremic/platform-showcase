@@ -1,0 +1,39 @@
+# SHAPE of a spoke registration -- the bootstrap path, before the
+# argocd-cluster-registry chart (ExternalSecrets, tokens in Key Vault) took over.
+# Kept for a cold start: the registry chart needs External Secrets running, which
+# itself is deployed by Argo.
+#
+# ONE-TIME, UNMANAGED -- not in ../kustomization.yaml. Fill a COPY in memory and
+# pipe it to kubectl; never commit the filled file:
+#   token=$(az keyvault secret show --vault-name kv-org-dev \
+#             --name argocd-<cluster>-token --query value -o tsv)
+#   sed "s|REPLACE_WITH_SA_TOKEN|$token|" cluster-template.yaml | kubectl -n argocd-hub apply -f -
+#
+# The registration's `name` must equal the cluster's directory under platform/ --
+# the appsets target spokes by destination NAME. `server` must be an address the
+# HUB can route to: an `argocd cluster add` against a local kubeconfig records
+# https://127.0.0.1:<port>, which is the hub's own loopback (the registry chart
+# refuses it). On AKS the API server listens on :443, not :6443.
+#
+# The token belongs to an `argocd-manager` ServiceAccount on the spoke. On an AKS
+# cluster with local accounts disabled, whoever mints it must already be in the
+# cluster's Entra admin group: there is no `--admin` kubeconfig to fall back on.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-REPLACE_WITH_CLUSTER_NAME
+  namespace: argocd-hub
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+type: Opaque
+stringData:
+  name: REPLACE_WITH_CLUSTER_NAME
+  server: https://REPLACE_WITH_API_ADDRESS:443
+  config: |
+    {
+      "bearerToken": "REPLACE_WITH_SA_TOKEN",
+      "tlsClientConfig": {
+        "insecure": false,
+        "caData": "REPLACE_WITH_BASE64_CA_CERT"
+      }
+    }

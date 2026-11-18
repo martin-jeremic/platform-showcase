@@ -1,0 +1,50 @@
+# payments-api CI (company build-once flow). Register as `payments-api-ci`; CD.yml triggers on it.
+#
+# Version -> build the image ONCE -> capture its digest -> publish the `deploy-meta-payments-api`
+# artifact (VERSION=, DIGEST=) -> push the payments-api chart (OCI). It never deploys and never
+# writes gitops: promotion is CD.yml's job.
+#
+# Path-filtered: one pipeline per deployable in a multi-service repository. The API image also
+# bakes the admin SPA, so src/AdminWeb is in its paths. The same list is mirrored in the PR branch
+# policy (platform/ci-templates/scripts/ado/set-branch-policies.sh).
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/Api/**
+      - src/Domain/**
+      - src/Contracts/**
+      - src/AdminWeb/**
+      - Directory.Build.props
+      - Directory.Packages.props
+      - GitVersion.yml
+      - helm/payments-api/**
+      - pipelines/api/**
+
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1
+
+stages:
+  - template: stages/versioning-gitversion.yml@templates
+    parameters:
+      gitVersionConfig: GitVersion.yml
+
+  - template: stages/build-stage.yml@templates
+    parameters:
+      dependsOn: [Versioning]
+      images:
+        - name: payments-api
+          dockerfile: src/Api/Dockerfile
+          # Repository root: Directory.*.props, the shared projects and the SPA folder.
+          buildContext: .
+      chartName: payments-api
+      chartDir: helm/payments-api

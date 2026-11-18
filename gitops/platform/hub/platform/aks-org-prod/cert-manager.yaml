@@ -1,0 +1,6 @@
+# Platform descriptor -- its PRESENCE deploys 'cert-manager' to 'aks-org-prod'.
+chartPath:     cert-manager
+chartRevision: cert-manager-1.1.0   # pinned git tag -- the pin that makes rollback possible
+releaseName:   cert-manager
+namespace:     cert-manager
+syncWave:      "1"

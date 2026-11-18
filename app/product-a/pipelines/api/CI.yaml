@@ -1,0 +1,76 @@
+# product-a-api CI. Register as `product-a-api-ci`; CD.yml triggers on that name.
+#
+# One pipeline per deployable in the monorepo, path-filtered to its own folder (plus what it
+# compiles in). The catalog lives outside these paths on purpose (see catalog-info.yaml).
+#
+#   develop: convention checks + version + tests -> az acr build -> Trivy (warn-only) -> digest
+#            recorded in product-a-gitops apps/product-a-api/dev/ and apps/product-a-db/dev/
+#            (same digest, same commit) -> both charts pushed at the SAME version.
+#   main:    no rebuild. The charts are pushed and the approval-gated Promote_Stage, Promote_Demo
+#            and Promote_Prod stages copy the recorded dev digest forward. Approving the ADO
+#            Environment check IS the deployment: it writes gitops, Argo syncs.
+#
+# The second chart is product-a-db, the migration Job that runs this very image. Packaging it in
+# the same job, at the same version, is what makes "API and schema Job pins can never differ" true
+# by construction rather than by review.
+
+trigger:
+  branches:
+    include:
+      - develop
+      - main
+  paths:
+    include:
+      - src/Api/**
+      - charts/product-a-db/**
+      - Directory.Build.props
+      - GitVersion.yml
+    exclude:
+      # A dev values change is a config-only redeploy (CD-config.yml), not a new build.
+      - src/Api/helm/product-a-api/values-dev.yaml
+      - charts/product-a-db/values-dev.yaml
+
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: platform/shared-templates
+      ref: refs/tags/v1          # pinned by tag: a template change never alters this pipeline by surprise
+    # Not checked out here. Declared so the job token covers the gitops repository when
+    # "Protect access to repositories in YAML pipelines" is on; the stage template clones it.
+    - repository: gitops
+      type: git
+      name: product-a/product-a-gitops
+
+stages:
+  - template: stages/convention-checks-stage.yml@templates
+
+  - template: stages/versioning-gitversion.yml@templates
+    parameters:
+      gitVersionConfig: GitVersion.yml
+
+  # Hermetic suites only (no database, no Docker). Testcontainers suites are excluded by an
+  # explicit category, never by --passWithNoTests: a glob that matches nothing must fail.
+  - template: stages/pr-dotnet-stage.yml@templates
+    parameters:
+      stageName: Test
+      dependsOn: [ConventionChecks]
+      solution: src/Api/ProductA.Api.csproj
+      suites:
+        - tests/Api.Tests/ProductA.Api.Tests.csproj
+      testFilter: Category!=RequiresDocker
+
+  - template: stages/build-or-promote-stage.yml@templates
+    parameters:
+      dependsOn: [Versioning, Test]
+      imageName: product-a-api
+      helmChartPath: src/Api/helm/product-a-api
+      dockerfilePath: src/Api/Dockerfile
+      # Monorepo root: the Dockerfile COPYs Directory.Build.props (and shared libraries) next to
+      # the service. The root .dockerignore keeps the uploaded context small.
+      buildContext: .
+      secondHelmChartPath: charts/product-a-db
+      secondImageName: product-a-db
+      scanImage: true

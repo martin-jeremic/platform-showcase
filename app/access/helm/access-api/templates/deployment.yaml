@@ -1,0 +1,236 @@
+{{- $fullname := include "access-api.fullname" . -}}
+{{- $kv := .Values.azureKeyVault -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+  {{- if $kv.enabled }}
+  annotations:
+    secret.reloader.stakater.com/reload: {{ $kv.syncedSecretName | quote }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "access-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "access-api.labels" . | nindent 8 }}
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ include "access-api.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}-config
+            {{- if $kv.enabled }}
+            - secretRef:
+                name: {{ $kv.syncedSecretName }}
+            {{- end }}
+          {{- with .Values.startupProbe }}
+          {{- if .enabled }}
+          startupProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            periodSeconds: {{ .periodSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          {{- if .enabled }}
+          readinessProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            periodSeconds: {{ .periodSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            periodSeconds: {{ .periodSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if $kv.enabled }}
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if $kv.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ $kv.secretProviderClassName | quote }}
+            {{- if eq $kv.authMode "servicePrincipal" }}
+            nodePublishSecretRef:
+              name: {{ $kv.credentialsSecretName }}
+            {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+  {{- if .Values.workloadIdentity.enabled }}
+  annotations:
+    azure.workload.identity/client-id: {{ required "workloadIdentity.clientId is required when enabled" .Values.workloadIdentity.clientId | quote }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+  selector:
+    {{- include "access-api.selectorLabels" . | nindent 4 }}
+{{- if and .Values.gateway.enabled .Values.route.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      {{- with .Values.gateway.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml (required "route.hostnames is required" .Values.route.hostnames) | nindent 4 }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.path | quote }}
+      {{- if .Values.route.rewrite.enabled }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: {{ .Values.route.rewrite.replacePrefixMatch | quote }}
+      {{- end }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $fullname }}
+          port: {{ .Values.service.port }}
+          weight: 1
+{{- end }}
+{{- if $kv.enabled }}
+---
+{{- /* One plain value per vault object -> one .NET Section__Key (see payments-api for the full
+     reasoning and the three authModes). */}}
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: {{ $kv.secretProviderClassName }}
+  labels:
+    {{- include "access-api.labels" . | nindent 4 }}
+spec:
+  provider: azure
+  secretObjects:
+    - secretName: {{ $kv.syncedSecretName }}
+      type: Opaque
+      data:
+        - objectName: access-api--database
+          key: Database__Password
+        - objectName: access-api--identity-database
+          key: IdentityDatabase__Password
+        - objectName: access-api--identity-client-secret
+          key: Identity__ClientSecret
+        - objectName: access-api--broker-password
+          key: RabbitMq__Password
+  parameters:
+    usePodIdentity: "false"
+    {{- if eq $kv.authMode "workloadIdentity" }}
+    useVMManagedIdentity: "false"
+    clientID: {{ required "workloadIdentity.clientId is required" .Values.workloadIdentity.clientId | quote }}
+    {{- else if eq $kv.authMode "vmManagedIdentity" }}
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: {{ required "azureKeyVault.kubeletClientId is required for vmManagedIdentity" $kv.kubeletClientId | quote }}
+    {{- else if eq $kv.authMode "servicePrincipal" }}
+    useVMManagedIdentity: "false"
+    {{- else }}
+    {{- fail (printf "azureKeyVault.authMode must be workloadIdentity, vmManagedIdentity or servicePrincipal, got %q" $kv.authMode) }}
+    {{- end }}
+    tenantId: {{ required "azureKeyVault.tenantId is required" $kv.tenantId | quote }}
+    keyvaultName: {{ required "azureKeyVault.keyvaultName is required" $kv.keyvaultName | quote }}
+    objects: |
+      array:
+        - |
+          objectName: access-api--database
+          objectType: secret
+        - |
+          objectName: access-api--identity-database
+          objectType: secret
+        - |
+          objectName: access-api--identity-client-secret
+          objectType: secret
+        - |
+          objectName: access-api--broker-password
+          objectType: secret
+{{- end }}

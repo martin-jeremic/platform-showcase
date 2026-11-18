@@ -1,0 +1,15 @@
+{{- if .Values.alloy.enabled }}
+{{- if not .Values.global.cluster }}
+{{- fail "global.cluster must be set (unique cluster label, e.g. \"product-a-stage\")" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-agent-alloy-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cluster-monitoring-agent.labels" . | nindent 4 }}
+data:
+  config.alloy: |-
+{{ include "cluster-monitoring-agent.alloyConfig" . | indent 4 }}
+{{- end }}
